@@ -96,6 +96,7 @@ void    HalSerialPutChar(char c);
 #define VGA_WHITE   15
 
 void HalInitializeVga(void);
+void HalVgaRelocate(void);
 void HalVgaPutChar(char c);
 void HalVgaSetColor(UINT8 attribute);
 void HalVgaClear(void);

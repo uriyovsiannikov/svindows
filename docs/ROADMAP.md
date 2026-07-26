@@ -14,13 +14,18 @@ observable. Checked items are done and verified in QEMU.
 - [x] IDT with CPU exception handlers that dump a trap frame.
 - [ ] Serial-driven kernel debugger hooks (`DbgPrint`, breakpoints).
 
-## Phase 1 — Memory management (`Mm`)
+## Phase 1 — Memory management (`Mm`) (in progress)
 
-- [ ] Parse the Multiboot2 memory map into a physical page frame database.
-- [ ] Physical page allocator (`MmAllocatePages` / free list or buddy).
-- [ ] Kernel virtual address space + real page tables; drop the identity map.
-- [ ] Pool allocator (`ExAllocatePool` / `ExFreePool`).
-- [ ] Per-process address spaces (`MmCreateAddressSpace`).
+- [x] Parse the Multiboot2 memory map into a physical memory map.
+- [x] Physical page allocator (`MmAllocatePage`/`MmAllocatePages`, bitmap).
+- [x] Kernel virtual address space + real page tables; drop the identity map
+      (kernel window at -2 GiB, direct map of all RAM at `0xFFFF800000000000`).
+- [x] Pool allocator (`ExAllocatePool` / `ExFreePool`), growable kernel heap.
+- [ ] Per-process address spaces (`MmCreateAddressSpace`) — deferred to Phase 3,
+      alongside process creation, since it only becomes useful there.
+
+Also done in this phase: the executive pool allocator (`Ex`) that the rest of
+the kernel allocates from.
 
 ## Phase 2 — Executive & Object manager (`Ex`, `Ob`)
 

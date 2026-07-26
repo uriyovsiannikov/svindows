@@ -56,6 +56,14 @@ void HalInitializeVga(void)
     HalVgaClear();
 }
 
+void HalVgaRelocate(void)
+{
+    /* Recompute the framebuffer pointer against the current direct-map base
+     * (called after Mm swaps the identity map for the high-half direct map).
+     * Cursor position and screen contents are preserved. */
+    g_vga = (volatile UINT16 *)MmPhysToVirt(VGA_PHYS);
+}
+
 static void vga_scroll(void)
 {
     /* Move rows 1..H-1 up by one and clear the last row. */

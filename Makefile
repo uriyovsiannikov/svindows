@@ -24,7 +24,7 @@ CFLAGS := -std=gnu11 -ffreestanding \
           -fno-pic -fno-pie -no-pie \
           -mno-red-zone -mcmodel=kernel -mgeneral-regs-only \
           -fno-asynchronous-unwind-tables \
-          -Wall -Wextra -Wno-unused-parameter \
+          -Wall -Wextra -Wno-unused-parameter -Wno-multichar \
           -O2 -g -Ikernel/include
 
 NASMFLAGS := -f elf64 -g -F dwarf

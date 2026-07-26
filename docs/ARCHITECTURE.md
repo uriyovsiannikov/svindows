@@ -13,14 +13,17 @@ higher half:
 | Region                                  | Purpose                                    |
 | --------------------------------------- | ------------------------------------------ |
 | `0x0000000000000000`–`0x00007FFFFFFFFFFF` | user space (per-process), unused for now |
-| `0xFFFF800000000000`–…                   | reserved for the physical-memory map (WIP) |
-| `0xFFFFFFFF80000000`–`0xFFFFFFFFFFFFFFFF` | kernel image + kernel data (`-2 GiB`)     |
+| `0xFFFF800000000000`–…                   | direct map of all physical RAM (2 MiB pages) |
+| `0xFFFFFFFF80000000`–`0xFFFFFFFFBFFFFFFF` | kernel image + kernel data (`-2 GiB`)     |
+| `0xFFFFFFFFC0000000`–…                   | kernel pool heap (`-1 GiB`, grows on demand) |
 
 The kernel is linked at virtual base `0xFFFFFFFF80000000` and loaded at physical
 `0x100000` (1 MiB). Early boot maps the first 1 GiB both identity-mapped and at
 the kernel's higher-half base so the trampoline can survive the jump into the
-higher half. The memory manager will later build the real page tables and drop
-the identity mapping.
+higher half. `Mm` then builds the kernel's own page tables — the kernel window
+plus a direct map of all RAM — switches `CR3`, and drops the identity map. After
+that, any physical page is reachable at `MM_DIRECT_MAP_BASE + phys` via
+`MmPhysToVirt`, and `ExAllocatePool` hands out memory from the growable heap.
 
 ## Boot flow
 
@@ -46,11 +49,11 @@ The directory names match NT's internal prefixes, so a symbol like
 | ------ | --------- | ---------------------------------------------------------- | ----- |
 | `Ke`   | `ke/`     | CPU control, interrupts/traps, scheduling, synchronization | early |
 | `Hal`  | `hal/`    | port I/O, serial, VGA, timers, interrupt controllers       | early |
-| `Mm`   | `mm/`     | physical & virtual memory, pools, address spaces           | stub  |
+| `Mm`   | `mm/`     | physical & virtual memory, direct map, page tables         | working |
 | `Ob`   | `ob/`     | object manager: object types, handles, namespace           | stub  |
 | `Ps`   | `ps/`     | processes and threads                                      | stub  |
 | `Io`   | `io/`     | I/O manager, device/driver model, IRPs                     | stub  |
-| `Ex`   | `ex/`     | executive support: pool allocator, sync primitives         | stub  |
+| `Ex`   | `ex/`     | executive support: pool allocator, sync primitives         | early |
 | `Rtl`  | `rtl/`    | runtime library: strings, memory, lists, formatting        | early |
 
 ## Calling conventions and the NT ABI

@@ -25,6 +25,10 @@ The kernel currently:
   that dump a trap frame.
 - Exposes NT-style base types (`NTSTATUS`, `LIST_ENTRY`, …) and a small `Rtl`
   runtime library.
+- Runs a real **memory manager**: parses the firmware memory map, allocates
+  physical frames from a bitmap **PMM**, builds its own page tables with a
+  full-RAM **direct map** (dropping the identity map), and serves kernel
+  allocations from a growable **pool** (`ExAllocatePool`).
 
 See [`docs/ROADMAP.md`](docs/ROADMAP.md) for what comes next (physical/virtual
 memory manager, object manager, threads & scheduler, system-call boundary, and
@@ -60,8 +64,9 @@ kernel/
   ke/            Kernel core (KiSystemStartup, scheduling — WIP)
   hal/           Hardware Abstraction Layer (serial, VGA, port I/O)
   rtl/           Runtime Library (memory, string, formatted print, lists)
-  mm/ ob/ ps/    Memory / Object / Process managers (stubs, being filled in)
-  io/ ex/        I/O manager / Executive support (stubs)
+  mm/            Memory Manager (multiboot map, PMM, page tables, direct map)
+  ex/            Executive support (pool allocator)
+  ob/ ps/ io/    Object / Process / I/O managers (stubs, being filled in)
 docs/            architecture notes and roadmap
 scripts/         helper scripts
 ```
