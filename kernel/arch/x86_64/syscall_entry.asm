@@ -87,11 +87,19 @@ KiEnterUserMode:
 
     mov     rcx, rdx              ; entry-point argument (Windows: first arg = RCX)
 
-    ; The entry is treated like a called function, so present RSP % 16 == 8 (as
-    ; if a return address had been pushed onto a 16-aligned stack). C entry
-    ; points rely on this.
+    ; The entry is treated like a called function. Present RSP % 16 == 8 (as if
+    ; a return address had been pushed onto a 16-aligned stack) AND leave the
+    ; 32-byte "home"/shadow space above RSP mapped: a real Win64 prologue homes
+    ; its non-volatile registers into [rsp+8]..[rsp+0x20] (the caller's shadow
+    ; space) before allocating its own frame, so those slots must be writable.
+    ; Reserving 0x28 (0x20 home + one return slot) keeps RSP % 16 == 8 and keeps
+    ; the whole home space inside the mapped stack.
     and     rsi, -16
-    sub     rsi, 8
+    sub     rsi, 0x28
+    mov     qword [rsi], 0        ; return slot: a stray `ret` from the entry
+                                  ; faults at RIP=0 (caught) instead of running
+                                  ; off into mapped code. The CRT exits via
+                                  ; ExitProcess and never returns here.
 
     ; Switch the active GS base to this thread's TEB (held in KERNEL_GS_BASE by
     ; the scheduler) before entering ring 3.

@@ -9,6 +9,7 @@
 #include <nt/ntdef.h>
 #include <ntos/ke.h>
 #include <ntos/hal.h>
+#include <ntos/mm.h>
 
 static const char *const g_exception_names[32] = {
     "#DE Divide-by-Zero",
@@ -68,6 +69,20 @@ static void dump_frame(PKTRAP_FRAME f)
           (void *)f->r8, (void *)f->r9, (void *)f->r10, (void *)f->r11);
     KeLog("R12=%p R13=%p R14=%p R15=%p\n",
           (void *)f->r12, (void *)f->r13, (void *)f->r14, (void *)f->r15);
+
+    /* Debug aid: raw bytes at the faulting RIP and the top of the stack. */
+    if (f->rip && MmIsUserAddress(f->rip) && MmProbeForRead(f->rip, 16)) {
+        const volatile UINT8 *ip = (const volatile UINT8 *)f->rip;
+        KeLog("code@RIP:");
+        for (int i = 0; i < 16; i++)
+            KeLog(" %02x", ip[i]);
+        KeLog("\n");
+    }
+    if (f->rsp && MmIsUserAddress(f->rsp) && MmProbeForRead(f->rsp, 32)) {
+        const volatile UINT64 *sp = (const volatile UINT64 *)f->rsp;
+        KeLog("stack@RSP: %p %p %p %p\n",
+              (void *)sp[0], (void *)sp[1], (void *)sp[2], (void *)sp[3]);
+    }
 }
 
 void KiDispatchTrap(PKTRAP_FRAME frame)

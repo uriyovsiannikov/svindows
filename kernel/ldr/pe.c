@@ -225,29 +225,59 @@ static UINT64 LdrpProcByOrdinal(UINT64 base, UINT16 ordinal)
 /* Forward declaration: importing an image may pull in dependency modules. */
 static UINT64 LdrpLoadModule(const char *name);
 
-/* Fixed user VA for the shared "unimplemented import" stub. */
-#define LDR_IMPORT_STUB_VA 0x0000000000069000ULL
+/* A per-import stub arena in low user memory. Each unresolved import gets its
+ * own 16-byte slot, so a single arena serves imports that are functions AND
+ * imports that are data:
+ *
+ *   - A missing FUNCTION is pointed at its slot and called: the slot's first
+ *     bytes are `xor eax, eax; ret`, so the call harmlessly returns 0.
+ *   - A missing DATA export (e.g. msvcrt's `_fmode`, `_commode`) has an IAT slot
+ *     that is a *pointer to the variable*; the image dereferences it and may
+ *     read or WRITE through it. Pointing it at its own slot means such a write
+ *     lands in that slot alone and cannot corrupt any other stub.
+ *
+ * The arena is therefore mapped writable *and* executable (a deliberate W^X
+ * exception for this bootstrap shim). Giving every import a distinct slot is
+ * what makes the two uses coexist: a slot used as data is never executed, and a
+ * slot used as code is never written. */
+#define LDR_STUB_ARENA_VA    0x0000000000069000ULL
+#define LDR_STUB_ARENA_PAGES 4      /* 4 * 4096 / 16 = 1024 stub slots */
+#define LDR_STUB_SLOT_SIZE   16
 
-/*
- * A ring-3 routine (`xor eax, eax; ret`) that unresolved imports are pointed at,
- * so an image loads even when it imports functions we don't provide yet: the
- * call just returns 0 instead of failing the whole load. Created once, on demand.
- */
+static UINT64 g_stub_arena;   /* base VA once mapped */
+static UINT64 g_stub_next;    /* bump cursor for the next free slot */
+static UINT64 g_stub_end;     /* one past the arena */
+
 static UINT64 LdrpImportStub(void)
 {
-    static UINT64 stub;
-    if (!stub) {
-        UINT64 pa = MmAllocatePage();
-        if (pa == MM_INVALID_PHYS)
-            return 0;
-        MmMapPage(LDR_IMPORT_STUB_VA, pa, PTE_USER | PTE_WRITE);
-        UINT8 *code = (UINT8 *)LDR_IMPORT_STUB_VA;
-        code[0] = 0x31; /* xor eax, eax */
-        code[1] = 0xC0;
-        code[2] = 0xC3; /* ret          */
-        stub = LDR_IMPORT_STUB_VA;
+    if (!g_stub_arena) {
+        for (UINT64 i = 0; i < LDR_STUB_ARENA_PAGES; i++) {
+            UINT64 pa = MmAllocatePage();
+            if (pa == MM_INVALID_PHYS)
+                return 0;
+            MmMapPage(LDR_STUB_ARENA_VA + i * PAGE_SIZE, pa,
+                      PTE_USER | PTE_WRITE);
+        }
+        memset((void *)LDR_STUB_ARENA_VA, 0,
+               LDR_STUB_ARENA_PAGES * PAGE_SIZE);
+        g_stub_arena = LDR_STUB_ARENA_VA;
+        g_stub_next = LDR_STUB_ARENA_VA;
+        g_stub_end = LDR_STUB_ARENA_VA + LDR_STUB_ARENA_PAGES * PAGE_SIZE;
     }
-    return stub;
+
+    /* Out of slots: fall back to the first one. Sharing degrades correctness for
+     * data imports but keeps the image loadable rather than failing outright. */
+    if (g_stub_next + LDR_STUB_SLOT_SIZE > g_stub_end)
+        return g_stub_arena;
+
+    UINT64 slot = g_stub_next;
+    g_stub_next += LDR_STUB_SLOT_SIZE;
+    UINT8 *code = (UINT8 *)slot;
+    code[0] = 0x31; /* xor eax, eax */
+    code[1] = 0xC0;
+    code[2] = 0xC3; /* ret          */
+    /* bytes 3..15 stay zero: scratch for a data-import dereference. */
+    return slot;
 }
 
 static NTSTATUS LdrResolveImports(UINT64 base)
@@ -264,44 +294,48 @@ static NTSTATUS LdrResolveImports(UINT64 base)
     for (; desc->Name != 0; desc++) {
         const char *dll = (const char *)(base + desc->Name);
         UINT64 dll_base = LdrpLoadModule(dll);
-        if (!dll_base) {
-            KeLog("[ldr]  import: dependency '%s' not found\n", dll);
-            return STATUS_INVALID_IMAGE_FORMAT;
-        }
+        /* A dependency DLL we don't provide no longer fails the load: every
+         * import from it is stubbed (and logged), just like an individual
+         * missing function. */
+        if (!dll_base)
+            KeLog("[ldr]  dependency '%s' not found -> stubbing its imports\n",
+                  dll);
 
         UINT32 int_rva = desc->OriginalFirstThunk ? desc->OriginalFirstThunk
                                                    : desc->FirstThunk;
         UINT64 *names = (UINT64 *)(base + int_rva);
         UINT64 *iat = (UINT64 *)(base + desc->FirstThunk);
 
-        UINT32 stubbed = 0;
+        UINT32 stubbed = 0, linked = 0;
         for (UINT32 i = 0; names[i]; i++) {
             UINT64 thunk = names[i];
-            UINT64 addr;
+            UINT64 addr = 0;
             if (thunk & IMAGE_ORDINAL_FLAG64) {
                 UINT16 ord = (UINT16)(thunk & 0xFFFF);
-                addr = LdrpProcByOrdinal(dll_base, ord);
+                if (dll_base)
+                    addr = LdrpProcByOrdinal(dll_base, ord);
                 if (!addr)
-                    KeLog("[ldr]  STUB unimplemented import %s!#%u\n", dll, ord);
+                    KeLog("[ldr]  STUB %s!#%u\n", dll, ord);
             } else {
                 IMAGE_IMPORT_BY_NAME *ibn =
                     (IMAGE_IMPORT_BY_NAME *)(base + (thunk & 0x7FFFFFFF));
-                addr = LdrGetProcAddress(dll_base, ibn->Name);
+                if (dll_base)
+                    addr = LdrGetProcAddress(dll_base, ibn->Name);
                 if (!addr)
-                    KeLog("[ldr]  STUB unimplemented import %s!%s\n",
-                          dll, ibn->Name);
+                    KeLog("[ldr]  STUB %s!%s\n", dll, ibn->Name);
             }
             /* Unresolved imports get a return-0 stub so the image still loads;
              * the log above is the to-do list of what a binary actually needs. */
             if (!addr) {
                 addr = LdrpImportStub();
                 stubbed++;
+            } else {
+                linked++;
             }
             iat[i] = addr;
         }
         if (stubbed)
-            KeLog("[ldr]  linked imports from %s (base %p, %u stubbed)\n",
-                  dll, (void *)dll_base, stubbed);
+            KeLog("[ldr]  %s: %u linked, %u stubbed\n", dll, linked, stubbed);
         else
             KeLog("[ldr]  linked imports from %s (base %p)\n", dll,
                   (void *)dll_base);
