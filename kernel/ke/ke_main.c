@@ -14,7 +14,21 @@
 #include <ntos/ob.h>
 #include <ntos/rtl.h>
 
-#define NTOS_VERSION "0.2.0"
+#define NTOS_VERSION "0.3.0"
+
+/* A demo kernel thread: print a few iterations with busy work in between so the
+ * timer preempts it and the three copies visibly interleave. */
+static void DemoWorker(PVOID context)
+{
+    const char *name = (const char *)context;
+    for (int i = 0; i < 5; i++) {
+        KeLog("   [thread %s] iteration %d at tick %lu\n",
+              name, i, (unsigned long)KeGetTickCount());
+        for (volatile UINT64 spin = 0; spin < 15000000ULL; spin++)
+            ;
+    }
+    KeLog("   [thread %s] finished\n", name);
+}
 
 /* Delete procedure for the demo "Event" object type. */
 static void DemoEventDelete(POBJECT object)
@@ -149,11 +163,24 @@ void KiSystemStartup(UINT32 magic, UINT32 mbi_phys)
     ObInitialize();
     ObjectManagerDemo();
 
+    /* Phase 3: threads + preemptive scheduler. */
+    KeLog("[test] --- scheduler demo: three preemptible kernel threads ---\n");
+    KeInitializeScheduler();
+    KeCreateThread("Alpha", DemoWorker, (PVOID)"Alpha", 8);
+    KeCreateThread("Beta",  DemoWorker, (PVOID)"Beta", 8);
+    KeCreateThread("Gamma", DemoWorker, (PVOID)"Gamma", 8);
+
+    HalInitializePic();
+    HalRegisterIrqHandler(0, KeClockTick);
+    HalInitializeTimer(100); /* 100 Hz preemption tick */
+
     HalVgaSetColor(VGA_COLOR(VGA_LGREEN, VGA_BLACK));
-    KeLog("\n[ok]   phase 2 (object manager) initialization complete. Halting (idle).\n");
+    KeLog("\n[ok]   phase 3 (scheduler) online; enabling interrupts, entering idle.\n");
     HalVgaSetColor(VGA_COLOR(VGA_LGRAY, VGA_BLACK));
 
-    /* No scheduler yet: park the boot processor. */
+    /* Become the idle thread: interrupts on, halt until the next tick. The
+     * scheduler will preempt this loop to run the ready threads. */
+    __sti();
     for (;;)
         __halt();
 }

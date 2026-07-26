@@ -38,12 +38,16 @@ the kernel allocates from.
       absolute-path lookup (e.g. `\Device\TestEvent`).
 - [ ] Synchronization objects: events, mutexes, semaphores (needs `Ke` waits).
 
-## Phase 3 — Threads, processes, scheduler (`Ke`, `Ps`)
+## Phase 3 — Threads, processes, scheduler (`Ke`, `Ps`) (in progress)
 
-- [ ] `KTHREAD` / `KPROCESS`, context switch.
-- [ ] Priority-based, preemptive scheduler driven by the timer (APIC/PIT).
-- [ ] `ETHREAD` / `EPROCESS` and process/thread creation.
-- [ ] Kernel-mode threads first, then a user/kernel privilege split.
+- [x] `KTHREAD` / `KPROCESS` and the context switch (`KiSwitchContext`).
+- [x] Preemptive scheduler driven by the 8254 PIT via the remapped 8259 PIC;
+      round-robin with per-thread quanta, `KeCreateThread` / `KeYield` /
+      `KeTerminateThread`.
+- [ ] Priority-based ordering (the `Priority` field exists but scheduling is
+      currently round-robin) and thread synchronization/wait.
+- [ ] `ETHREAD` / `EPROCESS` executive wrappers and a terminated-thread reaper.
+- [ ] Kernel-mode threads work today; the user/kernel privilege split is Phase 4.
 
 ## Phase 4 — Traps, interrupts, system calls
 

@@ -29,6 +29,20 @@ static ALWAYS_INLINE LONG InterlockedExchange(volatile LONG *target, LONG value)
     return __atomic_exchange_n(target, value, __ATOMIC_SEQ_CST);
 }
 
+/* Save RFLAGS and disable interrupts; restore later. Used to make short
+ * critical sections atomic against preemption on the local CPU. */
+static ALWAYS_INLINE UINT64 KiIrqSave(void)
+{
+    UINT64 flags;
+    __asm__ volatile("pushfq; pop %0; cli" : "=r"(flags) : : "memory");
+    return flags;
+}
+
+static ALWAYS_INLINE void KiIrqRestore(UINT64 flags)
+{
+    __asm__ volatile("push %0; popfq" : : "r"(flags) : "memory", "cc");
+}
+
 /* ------------------------------------------------------------------ */
 /* Boot information handed to the kernel by the boot trampoline        */
 /* ------------------------------------------------------------------ */
@@ -95,5 +109,62 @@ typedef struct _KTRAP_FRAME {
 
 /* Called from the assembly stubs with a pointer to the trap frame. */
 void KiDispatchTrap(PKTRAP_FRAME frame);
+
+/* ------------------------------------------------------------------ */
+/* Threads, processes, and the scheduler                              */
+/* ------------------------------------------------------------------ */
+
+typedef enum _KTHREAD_STATE {
+    ThreadStateInitialized = 0,
+    ThreadStateReady,
+    ThreadStateRunning,
+    ThreadStateTerminated,
+} KTHREAD_STATE;
+
+typedef void (*PKSTART_ROUTINE)(PVOID StartContext);
+
+struct _KPROCESS;
+
+/*
+ * KTHREAD - a schedulable thread of execution. Each thread owns a kernel stack;
+ * KernelStackPointer holds its saved RSP while it is not the running thread.
+ */
+typedef struct _KTHREAD {
+    UINT64          KernelStackPointer; /* saved RSP when switched out       */
+    UINT64          KernelStackBase;    /* allocation base (for teardown)    */
+    SIZE_T          KernelStackSize;
+    KTHREAD_STATE   State;
+    LONG            Priority;
+    LONG            Quantum;            /* ticks left in the current slice   */
+    PKSTART_ROUTINE StartRoutine;
+    PVOID           StartContext;
+    LIST_ENTRY      ReadyEntry;         /* link in the scheduler ready queue */
+    LIST_ENTRY      ProcessEntry;       /* link in the owning process        */
+    ULONG           ThreadId;
+    const char     *Name;
+    struct _KPROCESS *Process;
+} KTHREAD, *PKTHREAD;
+
+/*
+ * KPROCESS - a container for threads and (later) an address space. For now all
+ * kernel threads share the kernel's page tables.
+ */
+typedef struct _KPROCESS {
+    UINT64     DirectoryTableBase; /* CR3 for this process                    */
+    LIST_ENTRY ThreadListHead;
+    ULONG      ProcessId;
+    const char *Name;
+} KPROCESS, *PKPROCESS;
+
+void      KeInitializeScheduler(void);
+PKTHREAD  KeCreateThread(const char *name, PKSTART_ROUTINE routine,
+                         PVOID context, LONG priority);
+PKTHREAD  KeGetCurrentThread(void);
+void      KeYield(void);
+NORETURN void KeTerminateThread(void);
+
+/* Called from the timer interrupt to drive preemption. */
+void      KeClockTick(void);
+UINT64    KeGetTickCount(void);
 
 #endif /* _NTOS_KE_H_ */

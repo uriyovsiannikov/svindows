@@ -19,7 +19,12 @@ int KeVLog(const char *fmt, va_list ap)
 {
     char buffer[KE_LOG_BUFFER_SIZE];
     int n = RtlFormatV(buffer, sizeof(buffer), fmt, ap);
+
+    /* Emit the whole line with interrupts masked so a preempting thread can't
+     * interleave characters into the middle of it. */
+    UINT64 flags = KiIrqSave();
     HalConsoleWrite(buffer);
+    KiIrqRestore(flags);
     return n;
 }
 

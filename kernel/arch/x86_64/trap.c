@@ -8,6 +8,7 @@
  */
 #include <nt/ntdef.h>
 #include <ntos/ke.h>
+#include <ntos/hal.h>
 
 static const char *const g_exception_names[32] = {
     "#DE Divide-by-Zero",
@@ -71,13 +72,21 @@ static void dump_frame(PKTRAP_FRAME f)
 
 void KiDispatchTrap(PKTRAP_FRAME frame)
 {
-    dump_frame(frame);
+    /* Hardware IRQs (remapped to vectors 32..47) go to the HAL, which EOIs the
+     * PIC and runs the registered handler (e.g. the scheduler tick). */
+    if (frame->vector >= IRQ_BASE_VECTOR && frame->vector < IRQ_BASE_VECTOR + 16) {
+        HalDispatchIrq((UINT8)(frame->vector - IRQ_BASE_VECTOR));
+        return;
+    }
 
-    if (frame->vector < 32)
+    /* CPU exceptions are fatal for now: dump and bugcheck. */
+    if (frame->vector < 32) {
+        dump_frame(frame);
         KeBugCheck(KE_UNEXPECTED_KERNEL_MODE_TRAP,
                    "Unhandled CPU exception in kernel mode");
+    }
 
-    /* Not reached under current configuration (no external IRQs enabled). */
-    KeLog("Ignoring unexpected external interrupt %lu\n",
-          (unsigned long)frame->vector);
+    /* Any other vector is unexpected. */
+    dump_frame(frame);
+    KeLog("Ignoring unexpected interrupt %lu\n", (unsigned long)frame->vector);
 }

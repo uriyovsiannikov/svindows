@@ -37,7 +37,8 @@ BIOS ──▶ GRUB (Multiboot2) ──▶ _start (32-bit, arch/x86_64/boot.asm)
    │  5. jump to the higher-half virtual address
    ▼
 KiSystemStartup (C, ke/ke_main.c)
-   │  HAL console → GDT/TSS → IDT → banner → idle
+   │  HAL console → GDT/TSS → IDT → Mm (memory) → Ob (objects)
+   │  → Ke scheduler + threads → PIC/PIT → sti → idle thread
 ```
 
 ## Executive components
@@ -47,8 +48,8 @@ The directory names match NT's internal prefixes, so a symbol like
 
 | Prefix | Directory | Responsibility                                             | State |
 | ------ | --------- | ---------------------------------------------------------- | ----- |
-| `Ke`   | `ke/`     | CPU control, interrupts/traps, scheduling, synchronization | early |
-| `Hal`  | `hal/`    | port I/O, serial, VGA, timers, interrupt controllers       | early |
+| `Ke`   | `ke/`     | CPU control, interrupts/traps, scheduling, synchronization | working |
+| `Hal`  | `hal/`    | port I/O, serial, VGA, PIC, PIT timer, IRQ dispatch        | working |
 | `Mm`   | `mm/`     | physical & virtual memory, direct map, page tables         | working |
 | `Ob`   | `ob/`     | object manager: object types, handles, namespace           | working |
 | `Ps`   | `ps/`     | processes and threads                                      | stub  |

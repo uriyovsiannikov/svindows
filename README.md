@@ -32,6 +32,10 @@ The kernel currently:
 - Provides an **object manager** (`Ob`): reference-counted objects with typed
   delete procedures, a handle table with access masks, and a `\`-rooted object
   namespace with directories and path lookup.
+- Runs multiple **kernel threads** under a **preemptive round-robin scheduler**
+  driven by the PIT timer (8259 PIC remapped, IRQ0 tick), with context
+  switching, per-thread quanta, `KeCreateThread` / `KeYield` /
+  `KeTerminateThread`.
 
 See [`docs/ROADMAP.md`](docs/ROADMAP.md) for what comes next (physical/virtual
 memory manager, object manager, threads & scheduler, system-call boundary, and
@@ -64,8 +68,8 @@ kernel/
   include/       public kernel headers
     nt/          NT ABI types and status codes (ntdef.h, ntstatus.h)
     ntos/        executive component interfaces (ke.h, hal.h, rtl.h, …)
-  ke/            Kernel core (KiSystemStartup, scheduling — WIP)
-  hal/           Hardware Abstraction Layer (serial, VGA, port I/O)
+  ke/            Kernel core (KiSystemStartup, threads, scheduler)
+  hal/           Hardware Abstraction Layer (serial, VGA, PIC, PIT, port I/O)
   rtl/           Runtime Library (memory, string, formatted print, lists)
   mm/            Memory Manager (multiboot map, PMM, page tables, direct map)
   ex/            Executive support (pool allocator)

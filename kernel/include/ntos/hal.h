@@ -109,4 +109,30 @@ void HalInitializeConsole(void);
 void HalConsolePutChar(char c);
 void HalConsoleWrite(const char *s);
 
+/* ------------------------------------------------------------------ */
+/* Interrupt controller (8259 PIC) and IRQ dispatch                   */
+/* ------------------------------------------------------------------ */
+
+/* Hardware IRQs are remapped to CPU vectors IRQ_BASE_VECTOR .. +15. */
+#define IRQ_BASE_VECTOR 32
+
+typedef void (*HAL_IRQ_HANDLER)(void);
+
+void HalInitializePic(void);
+void HalMaskIrq(UINT8 irq);
+void HalUnmaskIrq(UINT8 irq);
+void HalSendEoi(UINT8 irq);
+void HalRegisterIrqHandler(UINT8 irq, HAL_IRQ_HANDLER handler);
+
+/* Called by the trap dispatcher for vectors in the IRQ range. Sends the EOI
+ * (before running the handler, so a handler that context-switches away still
+ * unblocks the PIC) and invokes any registered handler. */
+void HalDispatchIrq(UINT8 irq);
+
+/* ------------------------------------------------------------------ */
+/* Programmable Interval Timer (8254 PIT), channel 0 -> IRQ0          */
+/* ------------------------------------------------------------------ */
+
+void HalInitializeTimer(UINT32 hz);
+
 #endif /* _NTOS_HAL_H_ */
