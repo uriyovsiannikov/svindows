@@ -49,11 +49,18 @@ the kernel allocates from.
 - [ ] `ETHREAD` / `EPROCESS` executive wrappers and a terminated-thread reaper.
 - [ ] Kernel-mode threads work today; the user/kernel privilege split is Phase 4.
 
-## Phase 4 — Traps, interrupts, system calls
+## Phase 4 — User mode and system calls (in progress)
 
-- [ ] APIC + IOAPIC bring-up, timer and keyboard interrupts.
-- [ ] User mode (ring 3), `syscall`/`sysret` fast system-call path.
-- [ ] The `Nt*` system service dispatch table (`KiServiceTable`).
+- [x] User mode (ring 3): GDT user descriptors ordered for SYSRET, `iretq`
+      transition, per-thread kernel stack via TSS.RSP0 + KPCR.
+- [x] `syscall`/`sysret` fast path: EFER.SCE, STAR/LSTAR/SFMASK, a swapgs +
+      stack-switch entry stub, and the ring-3 register ABI.
+- [x] The `Nt*` system service dispatch table (`KiServiceTable`) with the first
+      services (`NtDisplayString`, `NtDisplayNumber`, `NtTerminateThread`),
+      exercised by an in-kernel ring-3 test program.
+- [ ] APIC + IOAPIC bring-up; keyboard interrupt (still on the 8259 PIC / PIT).
+- [ ] Capture/validate user-mode pointers (SEH-style probing) instead of
+      trusting them.
 
 ## Phase 5 — I/O manager (`Io`)
 

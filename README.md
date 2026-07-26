@@ -36,6 +36,9 @@ The kernel currently:
   driven by the PIT timer (8259 PIC remapped, IRQ0 tick), with context
   switching, per-thread quanta, `KeCreateThread` / `KeYield` /
   `KeTerminateThread`.
+- Drops to **ring 3 (user mode)** and services **`syscall`/`sysret`** system
+  calls through a `KiServiceTable` of `Nt*` routines — the same mechanism a
+  native `ntdll` uses, and the bridge toward loading real `.exe` binaries.
 
 See [`docs/ROADMAP.md`](docs/ROADMAP.md) for what comes next (physical/virtual
 memory manager, object manager, threads & scheduler, system-call boundary, and

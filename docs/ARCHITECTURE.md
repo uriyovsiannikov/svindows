@@ -12,7 +12,7 @@ higher half:
 
 | Region                                  | Purpose                                    |
 | --------------------------------------- | ------------------------------------------ |
-| `0x0000000000000000`–`0x00007FFFFFFFFFFF` | user space (per-process), unused for now |
+| `0x0000000000000000`–`0x00007FFFFFFFFFFF` | user space (ring 3 code/stack mapped here) |
 | `0xFFFF800000000000`–…                   | direct map of all physical RAM (2 MiB pages) |
 | `0xFFFFFFFF80000000`–`0xFFFFFFFFBFFFFFFF` | kernel image + kernel data (`-2 GiB`)     |
 | `0xFFFFFFFFC0000000`–…                   | kernel pool heap (`-1 GiB`, grows on demand) |
@@ -37,9 +37,22 @@ BIOS ──▶ GRUB (Multiboot2) ──▶ _start (32-bit, arch/x86_64/boot.asm)
    │  5. jump to the higher-half virtual address
    ▼
 KiSystemStartup (C, ke/ke_main.c)
-   │  HAL console → GDT/TSS → IDT → Mm (memory) → Ob (objects)
-   │  → Ke scheduler + threads → PIC/PIT → sti → idle thread
+   │  HAL console → GDT/TSS → IDT → syscall MSRs → Mm (memory)
+   │  → Ob (objects) → Ke scheduler + threads (kernel + ring 3)
+   │  → PIC/PIT → sti → idle thread
 ```
+
+## System calls and ring 3
+
+A user thread enters ring 3 by `iretq`. It calls back into the kernel with the
+`syscall` instruction, whose entry (`arch/x86_64/syscall_entry.asm`) does the
+`swapgs` + kernel-stack switch through a per-CPU block (KPCR) reached via GS,
+then dispatches through `KiServiceTable` in `ke/syscall.c`. The user ABI mirrors
+System V with R10 replacing RCX (RCX/R11 are consumed by `syscall`): service
+number in RAX, arguments in RDI/RSI/RDX/R10/R8, result in RAX. `SYSRET` returns
+to ring 3. On every context switch the scheduler repoints TSS.RSP0 and the
+KPCR's kernel stack at the incoming thread, so a syscall or interrupt taken from
+ring 3 always lands on that thread's own kernel stack.
 
 ## Executive components
 

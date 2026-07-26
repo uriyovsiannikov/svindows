@@ -143,6 +143,12 @@ typedef struct _KTHREAD {
     ULONG           ThreadId;
     const char     *Name;
     struct _KPROCESS *Process;
+
+    /* User-mode threads start life in ring 3 at UserEntry with stack UserStack
+     * instead of calling a kernel StartRoutine. */
+    BOOLEAN         UserMode;
+    UINT64          UserEntry;
+    UINT64          UserStack;
 } KTHREAD, *PKTHREAD;
 
 /*
@@ -159,6 +165,8 @@ typedef struct _KPROCESS {
 void      KeInitializeScheduler(void);
 PKTHREAD  KeCreateThread(const char *name, PKSTART_ROUTINE routine,
                          PVOID context, LONG priority);
+PKTHREAD  KeCreateUserThread(const char *name, UINT64 user_entry,
+                            UINT64 user_stack, LONG priority);
 PKTHREAD  KeGetCurrentThread(void);
 void      KeYield(void);
 NORETURN void KeTerminateThread(void);
@@ -166,5 +174,27 @@ NORETURN void KeTerminateThread(void);
 /* Called from the timer interrupt to drive preemption. */
 void      KeClockTick(void);
 UINT64    KeGetTickCount(void);
+
+/* ------------------------------------------------------------------ */
+/* System calls and user mode (ring 3)                                */
+/* ------------------------------------------------------------------ */
+
+/* Program the syscall MSRs and per-CPU block. Call once during boot after the
+ * GDT is installed. */
+void KiInitializeSystemCalls(void);
+
+/* Point the CPU's ring-0 entry stack (TSS.RSP0 and the syscall entry's kernel
+ * stack) at `kernel_rsp`. The scheduler calls this on every context switch. */
+void KeSetKernelStack(UINT64 kernel_rsp);
+
+/* Set the TSS ring-0 stack pointer (implemented in gdt.c). */
+void KeSetTssRsp0(UINT64 rsp0);
+
+/* Assembly: drop to ring 3 at `entry` with stack `user_stack` (never returns). */
+void KiEnterUserMode(UINT64 entry, UINT64 user_stack);
+
+/* The C half of the system-service dispatcher, called from KiSystemCallEntry. */
+UINT64 KiSystemServiceDispatch(UINT64 number, UINT64 a1, UINT64 a2, UINT64 a3,
+                               UINT64 a4);
 
 #endif /* _NTOS_KE_H_ */

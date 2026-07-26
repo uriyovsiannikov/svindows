@@ -18,7 +18,8 @@
 #define THREAD_STACK_SIZE 0x4000 /* 16 KiB kernel stack per thread */
 
 extern void KiSwitchContext(UINT64 *save_rsp, UINT64 load_rsp);
-extern void KiThreadStartup(void); /* asm trampoline */
+extern void KiThreadStartup(void);                       /* asm trampoline   */
+extern void KiEnterUserMode(UINT64 entry, UINT64 stack); /* asm ring-3 switch */
 
 static KPROCESS       g_system_process;
 static KTHREAD        g_idle_thread;
@@ -55,8 +56,9 @@ void KeInitializeScheduler(void)
     KeLog("[ke]   scheduler ready: System process, idle thread\n");
 }
 
-PKTHREAD KeCreateThread(const char *name, PKSTART_ROUTINE routine,
-                        PVOID context, LONG priority)
+/* Allocate a thread and its kernel stack, fabricating the initial stack so the
+ * first KiSwitchContext to it 'ret's into KiThreadStartup. Not yet enqueued. */
+static PKTHREAD KepAllocThread(const char *name, LONG priority)
 {
     PKTHREAD t = ExAllocatePoolWithTag(NonPagedPool, sizeof(KTHREAD), 'rhtK');
     if (!t)
@@ -71,8 +73,6 @@ PKTHREAD KeCreateThread(const char *name, PKSTART_ROUTINE routine,
     t->KernelStackBase = (UINT64)stack;
     t->KernelStackSize = THREAD_STACK_SIZE;
 
-    /* Fabricate the initial stack so the first KiSwitchContext to this thread
-     * pops six zeroed callee-saved registers and 'ret's into KiThreadStartup. */
     UINT64 *sp = (UINT64 *)((UINT64)stack + THREAD_STACK_SIZE);
     *--sp = (UINT64)KiThreadStartup; /* return address for the final 'ret' */
     *--sp = 0;                       /* rbx */
@@ -83,22 +83,53 @@ PKTHREAD KeCreateThread(const char *name, PKSTART_ROUTINE routine,
     *--sp = 0;                       /* r15 (popped first) */
     t->KernelStackPointer = (UINT64)sp;
 
-    t->StartRoutine = routine;
-    t->StartContext = context;
     t->State = ThreadStateReady;
     t->Priority = priority;
     t->Quantum = DEFAULT_QUANTUM;
     t->ThreadId = g_next_thread_id++;
     t->Name = name;
     t->Process = &g_system_process;
+    return t;
+}
 
+static void KepEnqueueThread(PKTHREAD t)
+{
     UINT64 flags = KiIrqSave();
     InsertTailList(&g_ready_queue, &t->ReadyEntry);
     InsertTailList(&g_system_process.ThreadListHead, &t->ProcessEntry);
     KiIrqRestore(flags);
+}
+
+PKTHREAD KeCreateThread(const char *name, PKSTART_ROUTINE routine,
+                        PVOID context, LONG priority)
+{
+    PKTHREAD t = KepAllocThread(name, priority);
+    if (!t)
+        return NULL;
+
+    t->StartRoutine = routine;
+    t->StartContext = context;
+    KepEnqueueThread(t);
 
     KeLog("[ke]   created thread '%s' (id %u), stack %p\n",
-          name, t->ThreadId, stack);
+          name, t->ThreadId, (void *)t->KernelStackBase);
+    return t;
+}
+
+PKTHREAD KeCreateUserThread(const char *name, UINT64 user_entry,
+                            UINT64 user_stack, LONG priority)
+{
+    PKTHREAD t = KepAllocThread(name, priority);
+    if (!t)
+        return NULL;
+
+    t->UserMode = TRUE;
+    t->UserEntry = user_entry;
+    t->UserStack = user_stack;
+    KepEnqueueThread(t);
+
+    KeLog("[ke]   created user thread '%s' (id %u): entry %p, ustack %p\n",
+          name, t->ThreadId, (void *)user_entry, (void *)user_stack);
     return t;
 }
 
@@ -134,6 +165,11 @@ static void KiSchedule(void)
     next->Quantum = DEFAULT_QUANTUM;
     g_current_thread = next;
 
+    /* Point the CPU's ring-0 entry stack at the incoming thread's kernel stack,
+     * so a syscall or interrupt taken from ring 3 lands on the right stack. */
+    if (next->KernelStackBase)
+        KeSetKernelStack(next->KernelStackBase + next->KernelStackSize);
+
     KiSwitchContext(&prev->KernelStackPointer, next->KernelStackPointer);
     /* Control returns here only when `prev` is scheduled again. */
 }
@@ -149,8 +185,15 @@ void KeYield(void)
 void KiThreadBootstrap(void)
 {
     PKTHREAD t = g_current_thread;
-    if (t->StartRoutine)
+
+    if (t->UserMode) {
+        /* Drop to ring 3; the thread lives in user mode from here and only
+         * re-enters the kernel via syscalls and interrupts. Never returns. */
+        KiEnterUserMode(t->UserEntry, t->UserStack);
+    } else if (t->StartRoutine) {
         t->StartRoutine(t->StartContext);
+    }
+
     KeTerminateThread();
 }
 

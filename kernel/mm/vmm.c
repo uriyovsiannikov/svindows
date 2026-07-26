@@ -49,15 +49,21 @@ static UINT64 alloc_zeroed_table(void)
     return phys;
 }
 
-/* Return the phys of the next-level table under entry[index], allocating it if
- * absent. Intermediate tables are always writable. */
+/*
+ * Return the phys of the next-level table under *entry, allocating it if absent.
+ * Intermediate entries are marked writable and user-accessible; the actual
+ * privilege of any page is decided by the leaf PTE (access requires U/S set at
+ * every level, so a supervisor leaf stays kernel-only regardless).
+ */
 static UINT64 next_table(UINT64 *entry)
 {
     if (!(*entry & PTE_PRESENT)) {
         UINT64 t = alloc_zeroed_table();
-        *entry = t | PTE_PRESENT | PTE_WRITE;
+        *entry = t | PTE_PRESENT | PTE_WRITE | PTE_USER;
         return t;
     }
+    /* Ensure an existing intermediate also permits user access below it. */
+    *entry |= PTE_USER;
     return *entry & PTE_ADDR_MASK;
 }
 
