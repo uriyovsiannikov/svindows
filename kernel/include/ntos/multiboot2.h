@@ -60,4 +60,25 @@ typedef struct PACKED _MB_TAG_MMAP {
     MB_MMAP_ENTRY entries[]; /* (size - 16) / entry_size entries follow */
 } MB_TAG_MMAP;
 
+#define MB_FRAMEBUFFER_TYPE_RGB 1
+
+typedef struct PACKED _MB_TAG_FRAMEBUFFER {
+    UINT32 type;
+    UINT32 size;
+    UINT64 addr;      /* physical address of the framebuffer */
+    UINT32 pitch;     /* bytes per scanline */
+    UINT32 width;
+    UINT32 height;
+    UINT8  bpp;       /* bits per pixel */
+    UINT8  fb_type;   /* 1 = direct RGB */
+    UINT16 reserved;
+    /* RGB color-field layout follows for fb_type == RGB */
+    UINT8  red_field_position;
+    UINT8  red_mask_size;
+    UINT8  green_field_position;
+    UINT8  green_mask_size;
+    UINT8  blue_field_position;
+    UINT8  blue_mask_size;
+} MB_TAG_FRAMEBUFFER;
+
 #endif /* _NTOS_MULTIBOOT2_H_ */

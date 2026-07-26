@@ -120,6 +120,26 @@ the kernel allocates from.
       and match the real Windows `Nt*` numbers/signatures so that *unmodified*
       Windows binaries can run — the ReactOS/Wine-scale endgame.
 
+## Phase 7 — Graphics and the road to a desktop (in progress)
+
+The north star is a graphical shell — eventually a real Windows desktop
+(`explorer.exe`). That is a ReactOS-scale endeavour; this phase starts at the
+bottom of the graphics stack and builds up.
+
+- [x] Request a 32-bpp **linear framebuffer** from GRUB via the Multiboot2
+      framebuffer tag, parse the framebuffer info tag, and map the framebuffer
+      into the kernel direct map.
+- [x] **Graphics primitives**: put-pixel, filled rectangles, screen clear, and
+      an 8×16 **bitmap font** with glyph and string drawing.
+- [x] A **framebuffer text console** (scrolling) that the kernel log renders
+      into, and a composed **desktop** (title bar + console area + taskbar).
+      Verified by capturing a QEMU screendump over QMP.
+- [ ] A mouse (PS/2) + keyboard input stack and a hardware cursor.
+- [ ] A window/compositor model (drawing windows, z-order, dirty rectangles).
+- [ ] `win32k`-style kernel graphics + a `gdi32`/`user32` surface so Win32 GUI
+      programs can create windows and paint — the bridge from console programs
+      to a real desktop shell.
+
 ## Guiding rule
 
 Every milestone must boot in QEMU and print evidence of success over the serial

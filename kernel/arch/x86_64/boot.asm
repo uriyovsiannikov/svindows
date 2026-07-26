@@ -32,6 +32,15 @@ mb_header_start:
     dd  mb_header_end - mb_header_start
     dd  -(MB2_MAGIC + MB2_ARCH_I386 + (mb_header_end - mb_header_start))
 
+    ; Framebuffer request tag (type = 5): ask GRUB for a linear framebuffer.
+    align 8
+    dw  5                       ; type = framebuffer
+    dw  1                       ; flags: optional (fall back if unavailable)
+    dd  20                      ; size
+    dd  1024                    ; preferred width
+    dd  768                     ; preferred height
+    dd  32                      ; preferred bits per pixel
+
     ; End tag (type = 0, size = 8).
     align 8
     dw  0

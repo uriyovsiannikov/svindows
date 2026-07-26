@@ -15,9 +15,41 @@
 #include <ntos/ldr.h>
 #include <ntos/ps.h>
 #include <ntos/io.h>
+#include <ntos/gfx.h>
 #include <ntos/rtl.h>
 
 #define NTOS_VERSION "0.6.0"
+
+/* Compose a simple desktop on the framebuffer: a background, a top bar with the
+ * OS name, a taskbar, and a text area the kernel log renders into. */
+static void DrawDesktop(void)
+{
+    if (!GfxAvailable())
+        return;
+
+    UINT32 W = GfxFramebuffer.Width, H = GfxFramebuffer.Height;
+    UINT32 desktop = GfxColor(0x1e, 0x3a, 0x5f);
+    UINT32 bar     = GfxColor(0x0a, 0x14, 0x28);
+    UINT32 accent  = GfxColor(0x3a, 0x86, 0xff);
+    UINT32 white   = GfxColor(0xff, 0xff, 0xff);
+    UINT32 dim     = GfxColor(0x8a, 0xa0, 0xc0);
+
+    GfxClear(desktop);
+
+    /* Top bar. */
+    GfxFillRect(0, 0, W, 36, bar);
+    GfxFillRect(0, 36, W, 2, accent);
+    GfxDrawString(12, 10, "NTOS  -  NT-compatible OS for x86-64   (v" NTOS_VERSION ")",
+                  white, bar);
+
+    /* Taskbar. */
+    GfxFillRect(0, H - 32, W, 32, bar);
+    GfxFillRect(0, H - 32, W, 2, accent);
+    GfxDrawString(12, H - 22, "[ Start ]   kernel console", dim, bar);
+
+    GfxConsoleInit();
+    HalConsoleUseFramebuffer();
+}
 
 /* User stack for the loaded program (grows down from the top). */
 #define USER_STACK_TOP   0x0000000010010000ULL
@@ -151,6 +183,12 @@ void KiSystemStartup(UINT32 magic, UINT32 mbi_phys)
 
     /* Phase 1: memory management. */
     MmInitialize((UINT64)mbi_phys);
+
+    /* Bring up the framebuffer and draw the desktop; from here the kernel log
+     * also renders on the graphical screen. */
+    GfxInitialize();
+    DrawDesktop();
+    KeLog("NTOS graphical console online.\n");
 
     /* Sanity-check the new address space: translate a kernel address and a
      * direct-map address back to physical. */

@@ -94,6 +94,23 @@ normal Win32 program links only against kernel32 and never issues a raw syscall.
 compiled with `clang --target=x86_64-pc-windows-msvc` and linked with
 `lld-link` — ordinary PE files.
 
+## Graphics
+
+GRUB is asked for a 32-bpp linear framebuffer through a Multiboot2 framebuffer
+request tag (`arch/x86_64/boot.asm`). At boot, `mm/multiboot.c` reads the
+framebuffer info tag — physical address, pitch, dimensions, and the RGB field
+positions — into `GfxFramebuffer`. `GfxInitialize` (`hal/framebuffer.c`) maps
+the framebuffer (which lives above RAM) into the direct map, and the graphics
+primitives — put-pixel, filled rectangle, screen clear, and an 8×16 bitmap font
+(`hal/font8x16.c`, generated from a monospace TTF) — draw straight into it.
+
+A scrolling **framebuffer text console** sits on top of the primitives, and
+`ke/ke_main.c` composes a simple **desktop**: a title bar, the console area, and
+a taskbar. Once graphics are up, `HalConsolePutChar` (`hal/console.c`) fans the
+kernel log out to the serial port *and* the framebuffer console, so boot output
+appears on screen. This is the base of the graphics stack; input, a cursor, and
+a window/compositor model come next (see the roadmap).
+
 ## Executive components
 
 The directory names match NT's internal prefixes, so a symbol like
@@ -102,7 +119,7 @@ The directory names match NT's internal prefixes, so a symbol like
 | Prefix | Directory | Responsibility                                             | State |
 | ------ | --------- | ---------------------------------------------------------- | ----- |
 | `Ke`   | `ke/`     | CPU control, interrupts/traps, scheduling, synchronization | working |
-| `Hal`  | `hal/`    | port I/O, serial, VGA, PIC, PIT timer, IRQ dispatch        | working |
+| `Hal`  | `hal/`    | port I/O, serial, VGA, framebuffer, PIC, PIT, IRQ dispatch  | working |
 | `Mm`   | `mm/`     | physical & virtual memory, direct map, page tables         | working |
 | `Ob`   | `ob/`     | object manager: object types, handles, namespace           | working |
 | `Ps`   | `ps/`     | processes and threads (PEB/TEB, user process creation)     | early |

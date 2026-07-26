@@ -8,6 +8,7 @@
  */
 #include <ntos/mm.h>
 #include <ntos/multiboot2.h>
+#include <ntos/gfx.h>
 
 const char *MmRegionTypeName(MM_REGION_TYPE type)
 {
@@ -50,6 +51,25 @@ BOOLEAN MmParseMultibootMemoryMap(UINT64 mb_info_phys, MM_MEMORY_MAP *out)
         MB_TAG *tag = (MB_TAG *)MmPhysToVirt(cursor);
         if (tag->type == MB_TAG_TYPE_END)
             break;
+
+        if (tag->type == MB_TAG_TYPE_FRAMEBUFFER) {
+            MB_TAG_FRAMEBUFFER *fb = (MB_TAG_FRAMEBUFFER *)tag;
+            GfxFramebuffer.PhysAddr = fb->addr;
+            GfxFramebuffer.Pitch = fb->pitch;
+            GfxFramebuffer.Width = fb->width;
+            GfxFramebuffer.Height = fb->height;
+            GfxFramebuffer.Bpp = fb->bpp;
+            if (fb->fb_type == MB_FRAMEBUFFER_TYPE_RGB) {
+                GfxFramebuffer.RedShift = fb->red_field_position;
+                GfxFramebuffer.GreenShift = fb->green_field_position;
+                GfxFramebuffer.BlueShift = fb->blue_field_position;
+            } else {
+                GfxFramebuffer.RedShift = 16;
+                GfxFramebuffer.GreenShift = 8;
+                GfxFramebuffer.BlueShift = 0;
+            }
+            GfxFramebuffer.Present = TRUE;
+        }
 
         if (tag->type == MB_TAG_TYPE_MMAP) {
             MB_TAG_MMAP *mmap = (MB_TAG_MMAP *)tag;

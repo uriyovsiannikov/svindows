@@ -67,6 +67,12 @@ The kernel currently:
   syscalls), and the loader resolves the full `app.exe → kernel32.dll →
   ntdll.dll → syscall` chain off the disk. All three are real PEs built by the
   standard toolchain (`clang --target=x86_64-pc-windows-msvc` + `lld-link`).
+- **Draws a graphical desktop.** Requests a 32-bpp **linear framebuffer** from
+  GRUB via Multiboot2, maps it into the direct map, and provides graphics
+  primitives (pixels, filled rectangles, an 8×16 bitmap font). The kernel
+  composes a simple desktop — a title bar, a scrolling text console, and a
+  taskbar — and the kernel log is rendered on-screen (in addition to serial),
+  which is the first visible step toward a GUI shell.
 
 See [`docs/ROADMAP.md`](docs/ROADMAP.md) for what comes next (physical/virtual
 memory manager, object manager, threads & scheduler, system-call boundary, and
@@ -102,7 +108,7 @@ kernel/
     nt/          NT ABI types and status codes (ntdef.h, ntstatus.h)
     ntos/        executive component interfaces (ke.h, hal.h, rtl.h, …)
   ke/            Kernel core (KiSystemStartup, threads, scheduler)
-  hal/           Hardware Abstraction Layer (serial, VGA, PIC, PIT, port I/O)
+  hal/           Hardware Abstraction Layer (serial, VGA, framebuffer, PIC, PIT)
   rtl/           Runtime Library (memory, string, formatted print, lists)
   mm/            Memory Manager (multiboot map, PMM, page tables, direct map)
   ex/            Executive support (pool allocator)
