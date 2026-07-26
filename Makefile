@@ -37,10 +37,13 @@ C_SRC   := $(shell find kernel -name '*.c')
 ASM_SRC := $(shell find kernel -name '*.asm')
 OBJ     := $(patsubst %,$(BUILD)/%.o,$(C_SRC) $(ASM_SRC))
 
-# User-space test program, built as a real PE32+ executable and embedded in the
-# kernel image (see kernel/ldr/testpe.asm).
-TESTAPP := $(BUILD)/testapp.exe
-LLDLINK := lld-link
+# User-space images, built as real PE32+ files and embedded in the kernel image
+# (see kernel/ldr/testpe.asm): ntdll.dll (exports the Nt* syscall stubs) and
+# testapp.exe (imports them).
+TESTAPP  := $(BUILD)/testapp.exe
+NTDLL    := $(BUILD)/ntdll.dll
+NTDLLLIB := $(BUILD)/ntdll.lib
+LLDLINK  := lld-link
 
 QEMU        := qemu-system-x86_64
 QEMUFLAGS   := -m 256M -no-reboot -no-shutdown
@@ -57,16 +60,24 @@ $(BUILD)/%.asm.o: %.asm
 	@mkdir -p $(dir $@)
 	$(NASM) $(NASMFLAGS) $< -o $@
 
-# Test PE executable: assemble win64 object, link into a PE with LLD.
-$(TESTAPP): user/testapp.asm
+# ntdll.dll: the syscall-stub library, with an export table + import library.
+$(NTDLL): user/ntdll.asm user/ntdll.def
 	@mkdir -p $(BUILD)
-	$(NASM) -f win64 $< -o $(BUILD)/testapp.obj
-	$(LLDLINK) /subsystem:console /entry:Start /nodefaultlib \
-	           /out:$@ $(BUILD)/testapp.obj
+	$(NASM) -f win64 user/ntdll.asm -o $(BUILD)/ntdll.obj
+	$(LLDLINK) /dll /noentry /machine:x64 /nodefaultlib /def:user/ntdll.def \
+	           /out:$(NTDLL) /implib:$(NTDLLLIB) $(BUILD)/ntdll.obj
+	@echo "  DLL   $(NTDLL)"
+
+# testapp.exe: imports Nt* from ntdll (links against the import library).
+$(TESTAPP): user/testapp.asm $(NTDLL)
+	@mkdir -p $(BUILD)
+	$(NASM) -f win64 user/testapp.asm -o $(BUILD)/testapp.obj
+	$(LLDLINK) /subsystem:console /entry:Start /nodefaultlib /machine:x64 \
+	           /out:$@ $(BUILD)/testapp.obj $(NTDLLLIB)
 	@echo "  PE    $@"
 
-# The embedding stub incbin's the PE, so it must exist before we assemble it.
-$(BUILD)/kernel/ldr/testpe.asm.o: $(TESTAPP)
+# The embedding stub incbin's both images, so they must exist before assembly.
+$(BUILD)/kernel/ldr/testpe.asm.o: $(TESTAPP) $(NTDLL)
 
 $(KERNEL): $(OBJ) kernel/arch/x86_64/linker.ld
 	@mkdir -p $(dir $@)

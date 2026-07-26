@@ -1,36 +1,34 @@
 ; ============================================================================
-; user/testapp.asm - a native NTOS test program, built as a real PE executable.
+; user/testapp.asm - a native NTOS test program that imports from ntdll.
 ;
-; Assembled with `nasm -f win64` and linked with `lld-link` into a PE32+ image,
-; then embedded in the kernel and loaded by the NTOS PE loader. It talks to the
-; kernel only through the NTOS syscall ABI (no Windows runtime), so it needs no
-; import table and no CRT.
-;
-;   syscall ABI: number in RAX, args in RDI/RSI/RDX/R10/R8
-;     0 = NtDisplayString(rdi = pointer)
-;     1 = NtDisplayNumber(rdi = value)
-;     2 = NtTerminateThread()
+; Unlike the earlier version, this calls the Nt* functions provided by ntdll.dll
+; using the Windows x64 calling convention (first argument in RCX). The linker
+; records these as imports (an import directory + IAT); the NTOS PE loader
+; resolves the IAT against the loaded ntdll before the program runs.
 ; ============================================================================
 bits 64
 default rel
 
+extern NtDisplayString
+extern NtDisplayNumber
+extern NtTerminateThread
+
 section .text
 global Start
 Start:
-    lea     rdi, [message]        ; RIP-relative; valid once mapped at ImageBase
-    xor     eax, eax              ; NtDisplayString
-    syscall
+    sub     rsp, 40               ; 32-byte shadow space + 16-byte alignment
 
-    mov     edi, 0x00ABCDEF
-    mov     eax, 1                ; NtDisplayNumber
-    syscall
+    lea     rcx, [message]        ; arg1 in RCX (Windows calling convention)
+    call    NtDisplayString
 
-    mov     eax, 2                ; NtTerminateThread (does not return)
-    syscall
+    mov     ecx, 0x00ABCDEF       ; arg1
+    call    NtDisplayNumber
+
+    call    NtTerminateThread     ; does not return
 
 .hang:
     jmp     .hang
 
 section .rdata
 message:
-    db "Hello from a PE executable running in ring 3!", 0
+    db "Hello from a PE .exe, calling Nt* through ntdll imports!", 0

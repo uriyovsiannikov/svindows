@@ -18,8 +18,8 @@
 #define NTOS_VERSION "0.5.0"
 
 /* The embedded test PE executable (see kernel/ldr/testpe.asm). */
-extern char TestPeStart[];
-extern char TestPeEnd[];
+extern char TestappImageStart[];
+extern char TestappImageEnd[];
 
 /* User stack for the loaded program (grows down from the top). */
 #define USER_STACK_TOP   0x0000000010010000ULL
@@ -188,13 +188,14 @@ void KiSystemStartup(UINT32 magic, UINT32 mbi_phys)
     ObInitialize();
     ObjectManagerDemo();
 
-    /* Phase 6: load a real PE executable and run it in ring 3. */
-    KeLog("[test] --- loading and running an embedded PE executable ---\n");
+    /* Phase 6: load a PE executable, link its ntdll imports, and run it. */
+    KeLog("[test] --- loading a PE that imports Nt* from ntdll ---\n");
     KeInitializeScheduler();
 
-    UINT64 pe_entry, pe_base;
-    NTSTATUS st = LdrLoadPeImage(TestPeStart, (SIZE_T)(TestPeEnd - TestPeStart),
-                                 &pe_entry, &pe_base);
+    UINT64 pe_entry;
+    NTSTATUS st = LdrLoadExecutable(TestappImageStart,
+                                    (SIZE_T)(TestappImageEnd - TestappImageStart),
+                                    &pe_entry);
     if (NT_SUCCESS(st)) {
         UINT64 user_stack_top = SetupUserStack();
         KeCreateUserThread("testapp.exe", pe_entry, user_stack_top, 8);

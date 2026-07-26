@@ -73,13 +73,16 @@ the kernel allocates from.
       MZ/PE headers, maps `SizeOfImage`, lays out sections at their RVAs with
       per-section permissions, zero-fills BSS, and applies base relocations.
 - [x] Load and run the first native PE `.exe` in ring 3 — an image built by the
-      standard toolchain (`nasm -f win64` + `lld-link`), embedded in the kernel,
-      that prints and terminates itself purely through NTOS syscalls. The
-      syscall ABI plays the role a real `ntdll` will later fill.
-- [ ] A real `ntdll` stub library user images link against (instead of raw
-      `syscall` instructions), plus PE imports (IAT) resolution.
+      standard toolchain (`nasm -f win64` + `lld-link`), embedded in the kernel.
+- [x] A real `ntdll.dll` (built as a PE with an export table) providing the
+      Windows-form syscall stubs (`mov r10, rcx; syscall`), plus PE import (IAT)
+      resolution: the loader parses the import directory, loads `ntdll` on
+      demand, resolves each name against its export directory, and patches the
+      executable's IAT — the authentic Windows dynamic-linking flow. The syscall
+      ABI now matches Windows (args in `R10`/`RDX`/`R8`/`R9`).
 - [ ] Load PE images from a filesystem (needs Phase 5) rather than an embedded
-      blob.
+      blob; a proper module list (`PEB_LDR_DATA`).
+- [ ] Forwarded exports, bound imports, and TLS callbacks.
 - [ ] Grow the native API surface toward the real Windows `Nt*` set; later a
       Win32 personality (`kernel32`/`user32`) so that *unmodified* Windows
       binaries can run — the ReactOS/Wine-scale endgame.

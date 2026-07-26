@@ -16,7 +16,11 @@
 #define IMAGE_NT_OPTIONAL_HDR64_MAGIC  0x020B
 
 #define IMAGE_NUMBEROF_DIRECTORY_ENTRIES 16
+#define IMAGE_DIRECTORY_ENTRY_EXPORT     0
+#define IMAGE_DIRECTORY_ENTRY_IMPORT     1
 #define IMAGE_DIRECTORY_ENTRY_BASERELOC  5
+
+#define IMAGE_ORDINAL_FLAG64 0x8000000000000000ULL
 
 /* Section characteristics. */
 #define IMAGE_SCN_CNT_CODE     0x00000020
@@ -122,5 +126,36 @@ typedef struct PACKED _IMAGE_BASE_RELOCATION {
     UINT32 SizeOfBlock;
     /* followed by SizeOfBlock-8 bytes of UINT16 relocation entries */
 } IMAGE_BASE_RELOCATION, *PIMAGE_BASE_RELOCATION;
+
+/* --- Imports --- */
+
+typedef struct PACKED _IMAGE_IMPORT_DESCRIPTOR {
+    UINT32 OriginalFirstThunk; /* RVA of the import name table (INT) */
+    UINT32 TimeDateStamp;
+    UINT32 ForwarderChain;
+    UINT32 Name;               /* RVA of the imported DLL's name */
+    UINT32 FirstThunk;         /* RVA of the import address table (IAT) */
+} IMAGE_IMPORT_DESCRIPTOR, *PIMAGE_IMPORT_DESCRIPTOR;
+
+typedef struct PACKED _IMAGE_IMPORT_BY_NAME {
+    UINT16 Hint;
+    CHAR   Name[1]; /* NUL-terminated */
+} IMAGE_IMPORT_BY_NAME, *PIMAGE_IMPORT_BY_NAME;
+
+/* --- Exports --- */
+
+typedef struct PACKED _IMAGE_EXPORT_DIRECTORY {
+    UINT32 Characteristics;
+    UINT32 TimeDateStamp;
+    UINT16 MajorVersion;
+    UINT16 MinorVersion;
+    UINT32 Name;                  /* RVA of the DLL name */
+    UINT32 Base;                  /* starting ordinal number */
+    UINT32 NumberOfFunctions;
+    UINT32 NumberOfNames;
+    UINT32 AddressOfFunctions;    /* RVA -> DWORD[NumberOfFunctions] of func RVAs */
+    UINT32 AddressOfNames;        /* RVA -> DWORD[NumberOfNames] of name RVAs     */
+    UINT32 AddressOfNameOrdinals; /* RVA -> WORD[NumberOfNames] of ordinals       */
+} IMAGE_EXPORT_DIRECTORY, *PIMAGE_EXPORT_DIRECTORY;
 
 #endif /* _NT_PE_H_ */

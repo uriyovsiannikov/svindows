@@ -54,6 +54,17 @@ to ring 3. On every context switch the scheduler repoints TSS.RSP0 and the
 KPCR's kernel stack at the incoming thread, so a syscall or interrupt taken from
 ring 3 always lands on that thread's own kernel stack.
 
+## Loading executables
+
+`Ldr` (`ldr/pe.c`) loads PE32+ images the way Windows does: it maps the image at
+its preferred base, then **resolves imports** — for each imported DLL it loads
+the module (today from an in-kernel registry of embedded images; a filesystem
+later), looks each imported routine up in that module's export directory, and
+patches the executable's Import Address Table. So a program's `NtWriteFile`-style
+call compiles to an indirect call through the IAT into `ntdll.dll`, whose stub
+(`mov r10, rcx; mov eax, <n>; syscall`) crosses into the kernel. `ntdll.dll` and
+the test `.exe` are ordinary PE files produced by `nasm -f win64` + `lld-link`.
+
 ## Executive components
 
 The directory names match NT's internal prefixes, so a symbol like
