@@ -6,6 +6,7 @@
  */
 #include <ntos/hal.h>
 #include <ntos/gfx.h>
+#include <ntos/ke.h>
 
 static BOOLEAN g_use_framebuffer = FALSE;
 
@@ -24,10 +25,19 @@ void HalConsoleUseFramebuffer(void)
 void HalConsolePutChar(char c)
 {
     HalSerialPutChar(c);
-    if (g_use_framebuffer)
+
+    if (g_use_framebuffer) {
+        /* Lift the mouse cursor across the draw (and any scroll it triggers) so
+         * it isn't smeared into the console. Masked so the InputWorker thread
+         * can't repaint the cursor mid-update. */
+        UINT64 flags = KiIrqSave();
+        GfxHideCursor();
         GfxConsolePutChar(c);
-    else
+        GfxShowCursor();
+        KiIrqRestore(flags);
+    } else {
         HalVgaPutChar(c);
+    }
 }
 
 void HalConsoleWrite(const char *s)

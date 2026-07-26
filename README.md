@@ -73,6 +73,12 @@ The kernel currently:
   composes a simple desktop — a title bar, a scrolling text console, and a
   taskbar — and the kernel log is rendered on-screen (in addition to serial),
   which is the first visible step toward a GUI shell.
+- **Reads keyboard and mouse.** A **PS/2 keyboard** driver (IRQ1) translates
+  scancodes to ASCII into a ring buffer, and a **PS/2 mouse** driver (IRQ12)
+  decodes movement packets into a screen-clamped cursor position. A live input
+  thread echoes typed characters and draws an arrow **mouse cursor** that
+  follows the mouse, saving and restoring the pixels underneath it (and hiding
+  itself while the console draws) so the desktop stays intact.
 
 See [`docs/ROADMAP.md`](docs/ROADMAP.md) for what comes next (physical/virtual
 memory manager, object manager, threads & scheduler, system-call boundary, and
@@ -108,7 +114,7 @@ kernel/
     nt/          NT ABI types and status codes (ntdef.h, ntstatus.h)
     ntos/        executive component interfaces (ke.h, hal.h, rtl.h, …)
   ke/            Kernel core (KiSystemStartup, threads, scheduler)
-  hal/           Hardware Abstraction Layer (serial, VGA, framebuffer, PIC, PIT)
+  hal/           HAL (serial, VGA, framebuffer, PS/2 keyboard+mouse, PIC, PIT)
   rtl/           Runtime Library (memory, string, formatted print, lists)
   mm/            Memory Manager (multiboot map, PMM, page tables, direct map)
   ex/            Executive support (pool allocator)

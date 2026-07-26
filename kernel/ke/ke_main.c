@@ -16,6 +16,7 @@
 #include <ntos/ps.h>
 #include <ntos/io.h>
 #include <ntos/gfx.h>
+#include <ntos/input.h>
 #include <ntos/rtl.h>
 
 #define NTOS_VERSION "0.6.0"
@@ -67,6 +68,39 @@ static void DemoWorker(PVOID context)
             ;
     }
     KeLog("   [kthread %s] finished\n", name);
+}
+
+/* The input thread: draw and drive the mouse cursor from PS/2 motion, and echo
+ * typed characters into the console. This is the desktop's live input loop. */
+static void InputWorker(PVOID context)
+{
+    (void)context;
+
+    UINT32 last_seq = (UINT32)-1;
+
+    KeLog("[input] keyboard + mouse ready; move the mouse and type.\n");
+
+    for (;;) {
+        /* Echo any typed characters. */
+        while (KbdDataAvailable()) {
+            char c = KbdReadChar();
+            if (c)
+                KeLog("%c", c);
+        }
+
+        /* Redraw the cursor when the mouse has moved. Mask interrupts for the
+         * draw so a preemption can't split the save/restore of the pixels
+         * under the cursor. */
+        UINT32 seq = MouseState.Seq;
+        if (seq != last_seq) {
+            last_seq = seq;
+            UINT64 flags = KiIrqSave();
+            GfxMoveCursor(MouseState.X, MouseState.Y);
+            KiIrqRestore(flags);
+        }
+
+        KeYield();
+    }
 }
 
 /* Map a user stack and return its (16-byte aligned) top. */
@@ -250,6 +284,13 @@ void KiSystemStartup(UINT32 magic, UINT32 mbi_phys)
     HalInitializePic();
     HalRegisterIrqHandler(0, KeClockTick);
     HalInitializeTimer(100); /* 100 Hz preemption tick */
+
+    /* Input: PS/2 keyboard + mouse, and a thread that drives the cursor. */
+    HalInitializeKeyboard();
+    HalInitializeMouse();
+    if (GfxAvailable())
+        HalMouseSetBounds((INT32)GfxFramebuffer.Width, (INT32)GfxFramebuffer.Height);
+    KeCreateThread("Input", InputWorker, NULL, 8);
 
     HalVgaSetColor(VGA_COLOR(VGA_LGREEN, VGA_BLACK));
     KeLog("\n[ok]   PE loaded; running it in ring 3 alongside a kernel thread.\n");

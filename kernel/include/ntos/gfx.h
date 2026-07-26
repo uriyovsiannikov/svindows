@@ -44,4 +44,13 @@ void GfxDrawString(UINT32 x, UINT32 y, const char *s, UINT32 fg, UINT32 bg);
 void GfxConsoleInit(void);           /* set up the text area over the desktop */
 void GfxConsolePutChar(char c);
 
+/* Mouse cursor: draw the arrow sprite at (x,y), saving the pixels underneath so
+ * the next move restores them. Idempotent to redraw; call from a single thread. */
+void GfxMoveCursor(INT32 x, INT32 y);
+
+/* Lift / restore the cursor around a drawing burst so what's drawn underneath
+ * it (console text, scrolling) doesn't corrupt the saved background. */
+void GfxHideCursor(void);
+void GfxShowCursor(void);
+
 #endif /* _NTOS_GFX_H_ */

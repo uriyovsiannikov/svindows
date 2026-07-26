@@ -134,7 +134,10 @@ bottom of the graphics stack and builds up.
 - [x] A **framebuffer text console** (scrolling) that the kernel log renders
       into, and a composed **desktop** (title bar + console area + taskbar).
       Verified by capturing a QEMU screendump over QMP.
-- [ ] A mouse (PS/2) + keyboard input stack and a hardware cursor.
+- [x] A **PS/2 keyboard** (IRQ1, scancode→ASCII ring buffer) and **PS/2 mouse**
+      (IRQ12, movement packets) input stack, with a software **mouse cursor**
+      that follows the mouse (save/restore under the sprite, hidden while the
+      console draws so scrolling can't smear it).
 - [ ] A window/compositor model (drawing windows, z-order, dirty rectangles).
 - [ ] `win32k`-style kernel graphics + a `gdi32`/`user32` surface so Win32 GUI
       programs can create windows and paint — the bridge from console programs

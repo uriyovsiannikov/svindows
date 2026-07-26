@@ -108,8 +108,27 @@ A scrolling **framebuffer text console** sits on top of the primitives, and
 `ke/ke_main.c` composes a simple **desktop**: a title bar, the console area, and
 a taskbar. Once graphics are up, `HalConsolePutChar` (`hal/console.c`) fans the
 kernel log out to the serial port *and* the framebuffer console, so boot output
-appears on screen. This is the base of the graphics stack; input, a cursor, and
-a window/compositor model come next (see the roadmap).
+appears on screen.
+
+## Input and the cursor
+
+The 8042 PS/2 controller (`hal/ps2.c`) multiplexes a keyboard (IRQ1) and the
+mouse (IRQ12). The keyboard driver (`hal/keyboard.c`) translates set-1
+scancodes to ASCII, tracking shift/caps, into a ring buffer that `KbdReadChar`
+drains. The mouse driver (`hal/mouse.c`) reassembles the 3-byte movement
+packets into a screen-clamped `MouseState` (position + buttons), bumping a
+sequence counter on each change.
+
+A kernel **input thread** (`InputWorker` in `ke/ke_main.c`) is the desktop's
+live input loop: it echoes typed characters and, when the mouse sequence
+changes, moves the arrow **cursor**. `GfxMoveCursor` (`hal/framebuffer.c`) saves
+the pixels under the sprite and restores them on the next move. Because the
+cursor is a software overlay, any console drawing must not run while it is
+present: `HalConsolePutChar` lifts the cursor (`GfxHideCursor`) around each
+character and restores it after (`GfxShowCursor`), all with interrupts masked so
+the input thread can't repaint it mid-update. That keeps a console scroll from
+smearing the cursor across the screen. A window/compositor model comes next
+(see the roadmap).
 
 ## Executive components
 
