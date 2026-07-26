@@ -60,8 +60,13 @@ The kernel currently:
 - **User-mode multithreading**: waitable dispatcher objects (events, semaphores,
   mutants; threads signal on exit) with `KeWaitForSingleObject`, exposed as
   `NtCreateThread` / `NtCreateEvent` / `NtSetEvent` / `NtWaitForSingleObject`.
-  The test program spawns a worker thread, waits on an event the worker signals,
-  and then joins the worker's thread handle — all from ring 3.
+- **Runs a normal Win32 program.** A `kernel32.dll` (built from C) implements
+  the Win32 API — `GetStdHandle`, `WriteFile`, `ReadFile`, `CreateFileA`,
+  `CloseHandle`, `CreateThread`, `WaitForSingleObject`, `ExitProcess` — on top
+  of the native `ntdll`. The test `.exe` uses only the Win32 API (no raw
+  syscalls), and the loader resolves the full `app.exe → kernel32.dll →
+  ntdll.dll → syscall` chain off the disk. All three are real PEs built by the
+  standard toolchain (`clang --target=x86_64-pc-windows-msvc` + `lld-link`).
 
 See [`docs/ROADMAP.md`](docs/ROADMAP.md) for what comes next (physical/virtual
 memory manager, object manager, threads & scheduler, system-call boundary, and
@@ -105,7 +110,7 @@ kernel/
   ldr/           Image loader (PE/COFF, imports/exports, loads from disk)
   ps/            Process manager (PEB/TEB, user process creation)
   io/            I/O manager (ATA PIO block driver, FAT32 filesystem)
-user/            Native user-space sources (ntdll.dll, testapp.exe)
+user/            User-space sources (ntdll.dll, kernel32.dll, testapp.exe)
 docs/            architecture notes and roadmap
 scripts/         helper scripts
 ```

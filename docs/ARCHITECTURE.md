@@ -80,12 +80,19 @@ switch to another thread mid-syscall. `NtCreateThread`, `NtCreateEvent`,
 
 `Ldr` (`ldr/pe.c`) loads PE32+ images the way Windows does: it maps the image at
 its preferred base, then **resolves imports** — for each imported DLL it loads
-the module (today from an in-kernel registry of embedded images; a filesystem
-later), looks each imported routine up in that module's export directory, and
-patches the executable's Import Address Table. So a program's `NtWriteFile`-style
-call compiles to an indirect call through the IAT into `ntdll.dll`, whose stub
-(`mov r10, rcx; mov eax, <n>; syscall`) crosses into the kernel. `ntdll.dll` and
-the test `.exe` are ordinary PE files produced by `nasm -f win64` + `lld-link`.
+the module (from the mounted filesystem, on demand), looks each imported routine
+up in that module's export directory, and patches the executable's Import
+Address Table. Resolution recurses, so a full `app.exe -> kernel32.dll ->
+ntdll.dll` chain links up automatically.
+
+At the bottom, `ntdll.dll` is the native library: each `Nt*` export is a stub
+(`mov r10, rcx; mov eax, <n>; syscall`) that crosses into the kernel.
+`kernel32.dll` sits on top and implements the Win32 API (`WriteFile`,
+`CreateThread`, `ExitProcess`, ...) by calling those native routines, so a
+normal Win32 program links only against kernel32 and never issues a raw syscall.
+`ntdll.dll` is `nasm`-assembled; `kernel32.dll` and the Win32 test `.exe` are C,
+compiled with `clang --target=x86_64-pc-windows-msvc` and linked with
+`lld-link` — ordinary PE files.
 
 ## Executive components
 

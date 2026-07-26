@@ -73,6 +73,12 @@ KiEnterUserMode:
 
     mov     rcx, rdx              ; entry-point argument (Windows: first arg = RCX)
 
+    ; The entry is treated like a called function, so present RSP % 16 == 8 (as
+    ; if a return address had been pushed onto a 16-aligned stack). C entry
+    ; points rely on this.
+    and     rsi, -16
+    sub     rsi, 8
+
     ; Switch the active GS base to this thread's TEB (held in KERNEL_GS_BASE by
     ; the scheduler) before entering ring 3.
     swapgs

@@ -111,9 +111,14 @@ the kernel allocates from.
 - [ ] Load PE images from a filesystem (needs Phase 5) rather than an embedded
       blob; a proper module list (`PEB_LDR_DATA`).
 - [ ] Forwarded exports, bound imports, and TLS callbacks.
-- [ ] Grow the native API surface toward the real Windows `Nt*` set; later a
-      Win32 personality (`kernel32`/`user32`) so that *unmodified* Windows
-      binaries can run — the ReactOS/Wine-scale endgame.
+- [x] A **Win32 subsystem library `kernel32.dll`** (built from C, over ntdll)
+      with `GetStdHandle` / `WriteFile` / `ReadFile` / `CreateFileA` /
+      `CloseHandle` / `CreateThread` / `WaitForSingleObject` / `ExitProcess`,
+      and a **normal Win32 program** that links against it — the loader resolves
+      the full `app.exe -> kernel32.dll -> ntdll.dll` import chain from disk.
+- [ ] Grow the Win32 surface (`user32`/`gdi32`, a real CRT, `HeapAlloc`, ...)
+      and match the real Windows `Nt*` numbers/signatures so that *unmodified*
+      Windows binaries can run — the ReactOS/Wine-scale endgame.
 
 ## Guiding rule
 

@@ -38,13 +38,19 @@ ASM_SRC := $(shell find kernel -name '*.asm')
 OBJ     := $(patsubst %,$(BUILD)/%.o,$(C_SRC) $(ASM_SRC))
 
 # User-space images, built as real PE32+ files and placed on a FAT disk image
-# the kernel reads at runtime: ntdll.dll (exports the Nt* syscall stubs) and
-# testapp.exe (imports them).
-TESTAPP  := $(BUILD)/testapp.exe
-NTDLL    := $(BUILD)/ntdll.dll
-NTDLLLIB := $(BUILD)/ntdll.lib
-DISK     := $(BUILD)/disk.img
-LLDLINK  := lld-link
+# the kernel reads at runtime. The dependency chain is
+#   testapp.exe -> kernel32.dll -> ntdll.dll -> syscall
+# ntdll (asm) exports the Nt* syscall stubs; kernel32 (C) implements Win32 on
+# top of them; testapp (C) is a normal Win32 program.
+TESTAPP    := $(BUILD)/testapp.exe
+NTDLL      := $(BUILD)/ntdll.dll
+NTDLLLIB   := $(BUILD)/ntdll.lib
+KERNEL32   := $(BUILD)/kernel32.dll
+KERNEL32LIB := $(BUILD)/kernel32.lib
+DISK       := $(BUILD)/disk.img
+LLDLINK    := lld-link
+CLANGWIN   := clang --target=x86_64-pc-windows-msvc -ffreestanding \
+              -fno-stack-protector -fno-stack-check -O2
 
 QEMU        := qemu-system-x86_64
 # -boot d forces booting from the CD-ROM (the ISO); the hard disk is data only.
@@ -64,28 +70,41 @@ $(BUILD)/%.asm.o: %.asm
 	$(NASM) $(NASMFLAGS) $< -o $@
 
 # ntdll.dll: the syscall-stub library, with an export table + import library.
+# Each user DLL gets a distinct preferred base so the loader (which loads at the
+# preferred base) never has two images collide.
 $(NTDLL): user/ntdll.asm user/ntdll.def
 	@mkdir -p $(BUILD)
 	$(NASM) -f win64 user/ntdll.asm -o $(BUILD)/ntdll.obj
-	$(LLDLINK) /dll /noentry /machine:x64 /nodefaultlib /def:user/ntdll.def \
-	           /out:$(NTDLL) /implib:$(NTDLLLIB) $(BUILD)/ntdll.obj
+	$(LLDLINK) /dll /noentry /machine:x64 /nodefaultlib /base:0x180000000 \
+	           /def:user/ntdll.def /out:$(NTDLL) /implib:$(NTDLLLIB) \
+	           $(BUILD)/ntdll.obj
 	@echo "  DLL   $(NTDLL)"
 
-# testapp.exe: imports Nt* from ntdll (links against the import library).
-$(TESTAPP): user/testapp.asm $(NTDLL)
+# kernel32.dll: the Win32 subsystem library, built from C over ntdll.
+$(KERNEL32): user/kernel32.c $(NTDLL)
 	@mkdir -p $(BUILD)
-	$(NASM) -f win64 user/testapp.asm -o $(BUILD)/testapp.obj
+	$(CLANGWIN) -c user/kernel32.c -o $(BUILD)/kernel32.obj
+	$(LLDLINK) /dll /noentry /machine:x64 /nodefaultlib /base:0x1C0000000 \
+	           /out:$(KERNEL32) /implib:$(KERNEL32LIB) \
+	           $(BUILD)/kernel32.obj $(NTDLLLIB)
+	@echo "  DLL   $(KERNEL32)"
+
+# testapp.exe: a normal Win32 program (C), linked against kernel32.
+$(TESTAPP): user/testapp.c $(KERNEL32)
+	@mkdir -p $(BUILD)
+	$(CLANGWIN) -c user/testapp.c -o $(BUILD)/testapp.obj
 	$(LLDLINK) /subsystem:console /entry:Start /nodefaultlib /machine:x64 \
-	           /out:$@ $(BUILD)/testapp.obj $(NTDLLLIB)
+	           /out:$@ $(BUILD)/testapp.obj $(KERNEL32LIB)
 	@echo "  PE    $@"
 
 # FAT32 disk image holding the user-space executables, read by the kernel's
 # ATA + FAT drivers at runtime.
-$(DISK): $(TESTAPP) $(NTDLL) user/message.txt
+$(DISK): $(TESTAPP) $(KERNEL32) $(NTDLL) user/message.txt
 	@mkdir -p $(BUILD)
 	dd if=/dev/zero of=$(DISK) bs=1M count=64 status=none
 	mformat -i $(DISK) -F -v NTOSDISK ::
 	mcopy -i $(DISK) $(TESTAPP) ::TESTAPP.EXE
+	mcopy -i $(DISK) $(KERNEL32) ::KERNEL32.DLL
 	mcopy -i $(DISK) $(NTDLL) ::NTDLL.DLL
 	mcopy -i $(DISK) user/message.txt ::MESSAGE.TXT
 	@echo "  DISK  $(DISK)"
