@@ -31,6 +31,7 @@ extern HANDLE    NtCreateThread(LPVOID entry, LPVOID arg);
 extern long      NtWaitForSingleObject(HANDLE h);
 extern void      NtTerminateThread(void);
 extern ULONGLONG NtAllocateVirtualMemory(ULONGLONG size);
+extern HANDLE    NtLoadLibrary(const char *name);
 
 /* ------------------------------------------------------------------ */
 /* Freestanding helpers (no CRT)                                      */
@@ -140,6 +141,22 @@ __declspec(dllexport) HANDLE GetModuleHandleA(const char *name)
             return (HANDLE)e->DllBase;
     }
     return 0;
+}
+
+__declspec(dllexport) HANDLE LoadLibraryA(const char *name)
+{
+    /* Already loaded? Return the existing module (Windows semantics). */
+    HANDLE existing = GetModuleHandleA(name);
+    if (existing)
+        return existing;
+    /* Otherwise ask the kernel loader to map it and link it into PEB->Ldr. */
+    return NtLoadLibrary(name);
+}
+
+__declspec(dllexport) BOOL FreeLibrary(HANDLE module)
+{
+    (void)module; /* unloading is a no-op for now (no per-module refcounts) */
+    return 1;
 }
 
 /* ------------------------------------------------------------------ */

@@ -37,6 +37,7 @@ __declspec(dllimport) FARPROC GetProcAddress(HANDLE module, const char *name);
 __declspec(dllimport) HANDLE  GetProcessHeap(void);
 __declspec(dllimport) LPVOID  HeapAlloc(HANDLE heap, DWORD flags, SIZE_T bytes);
 __declspec(dllimport) BOOL    HeapFree(HANDLE heap, DWORD flags, LPVOID ptr);
+__declspec(dllimport) HANDLE  LoadLibraryA(const char *name);
 
 static HANDLE g_out;
 
@@ -108,6 +109,34 @@ static void demo_dynamic_runtime(void)
     print("  HeapFree ok\n");
 }
 
+/* Types of the functions we resolve out of the runtime-loaded extra.dll. */
+typedef DWORD       (*ExtraAddNumbers_t)(DWORD, DWORD);
+typedef const char *(*ExtraGreeting_t)(void);
+
+/* Load a DLL that isn't in our import chain, resolve its exports, and call
+ * them — the way a Windows program loads a plugin. */
+static void demo_loadlibrary(void)
+{
+    print("\n-- LoadLibraryA: load extra.dll at runtime --\n");
+
+    HANDLE extra = LoadLibraryA("extra.dll");
+    print_ptr("  LoadLibraryA(\"extra.dll\") = ", (ULONGLONG)extra);
+    if (!extra) {
+        print("  load failed\n");
+        return;
+    }
+
+    ExtraGreeting_t greet =
+        (ExtraGreeting_t)GetProcAddress(extra, "ExtraGreeting");
+    ExtraAddNumbers_t add =
+        (ExtraAddNumbers_t)GetProcAddress(extra, "ExtraAddNumbers");
+
+    if (greet)
+        print(greet());
+    if (add)
+        print_ptr("  ExtraAddNumbers(40, 2) = ", (ULONGLONG)add(40, 2));
+}
+
 static DWORD WorkerThread(LPVOID param)
 {
     (void)param;
@@ -137,6 +166,9 @@ void Start(void)
 
     /* Exercise dynamic module/symbol resolution and the heap. */
     demo_dynamic_runtime();
+
+    /* Load a DLL at runtime and call into it. */
+    demo_loadlibrary();
 
     print("main: exiting via ExitProcess\n");
     ExitProcess(0);

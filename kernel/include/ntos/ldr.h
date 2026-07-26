@@ -37,4 +37,8 @@ UINT64 LdrGetProcAddress(UINT64 module_base, const char *name);
 struct _PEB;
 void LdrBuildProcessModuleList(struct _PEB *peb, UINT64 ldr_va, UINT64 ldr_size);
 
+/* Load a DLL by name at runtime and link it into PEB->Ldr; returns the load
+ * base (0 on failure). Backs kernel32's LoadLibraryA. */
+UINT64 LdrLoadLibrary(const char *name);
+
 #endif /* _NTOS_LDR_H_ */

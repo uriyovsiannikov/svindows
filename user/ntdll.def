@@ -12,3 +12,4 @@ EXPORTS
     NtSetEvent
     NtWaitForSingleObject
     NtCreateThread
+    NtLoadLibrary

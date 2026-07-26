@@ -43,6 +43,19 @@ static ALWAYS_INLINE void KiIrqRestore(UINT64 flags)
     __asm__ volatile("push %0; popfq" : : "r"(flags) : "memory", "cc");
 }
 
+/* Save / restore the x87+SSE state (XMM registers, MXCSR, ...) to a 512-byte,
+ * 16-byte-aligned area. The context switch uses these so threads that use SSE
+ * (all user code does) don't clobber each other's XMM registers. */
+static ALWAYS_INLINE void KiSaveFpuState(void *area)
+{
+    __asm__ volatile("fxsave (%0)" : : "r"(area) : "memory");
+}
+
+static ALWAYS_INLINE void KiRestoreFpuState(const void *area)
+{
+    __asm__ volatile("fxrstor (%0)" : : "r"(area) : "memory");
+}
+
 /* ------------------------------------------------------------------ */
 /* Boot information handed to the kernel by the boot trampoline        */
 /* ------------------------------------------------------------------ */
@@ -202,6 +215,9 @@ typedef struct _KTHREAD {
      * dispatcher header (if any) that is signaled when it terminates. */
     KWAIT_BLOCK        WaitBlock;
     PDISPATCHER_HEADER TerminationObject;
+
+    /* x87+SSE state saved across context switches (FXSAVE image; 16-aligned). */
+    __attribute__((aligned(16))) UINT8 FpuState[512];
 } KTHREAD, *PKTHREAD;
 
 /*

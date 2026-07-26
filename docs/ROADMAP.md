@@ -121,8 +121,10 @@ the kernel allocates from.
       `GetProcAddress` (parses the PE export directory), and a process heap
       (`GetProcessHeap` / `HeapCreate` / `HeapAlloc` / `HeapFree`) over
       `NtAllocateVirtualMemory`. SSE enabled at boot for compiler-emitted XMM.
-- [ ] `LoadLibraryA` (load a DLL at runtime and link it into `PEB->Ldr`), and
-      preserve XMM/FPU state across context switches (FXSAVE/FXRSTOR).
+- [x] `LoadLibraryA` — load a DLL from disk at runtime (`NtLoadLibrary`) and
+      link it into `PEB->Ldr`; the app loads a standalone `extra.dll` (not in
+      its import chain), resolves its exports, and calls them. XMM/FPU state is
+      now preserved across context switches (FXSAVE/FXRSTOR).
 - [ ] A registry (hive + `NtCreateKey`/`NtQueryValueKey`/...).
 - [ ] Grow the Win32 surface (`user32`/`gdi32`, a real CRT, ...) and match the
       real Windows `Nt*` numbers/signatures so that *unmodified* Windows

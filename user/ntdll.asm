@@ -35,3 +35,4 @@ SYSCALL_STUB NtCreateEvent,           8
 SYSCALL_STUB NtSetEvent,              9
 SYSCALL_STUB NtWaitForSingleObject,   10
 SYSCALL_STUB NtCreateThread,          11
+SYSCALL_STUB NtLoadLibrary,           12

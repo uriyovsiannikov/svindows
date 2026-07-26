@@ -9,6 +9,7 @@
 #include <ntos/mm.h>
 #include <ntos/io.h>
 #include <ntos/ps.h>
+#include <ntos/ldr.h>
 #include <nt/ntstatus.h>
 
 /* --- Model-specific registers we program. --- */
@@ -149,6 +150,19 @@ static UINT64 NtAllocateVirtualMemory(UINT64 size, UINT64 a2, UINT64 a3,
     return base;
 }
 
+/* 12: load a DLL by name (user string) at runtime; returns its base or 0. */
+static UINT64 NtLoadLibrary(UINT64 name_ptr, UINT64 a2, UINT64 a3, UINT64 a4)
+{
+    (void)a2; (void)a3; (void)a4;
+    if (name_ptr == 0)
+        return 0;
+    /* Same address space: ring 0 can read the user name string directly. */
+    UINT64 base = LdrLoadLibrary((const char *)name_ptr);
+    KeLog("[user] NtLoadLibrary('%s') -> %p\n", (const char *)name_ptr,
+          (void *)base);
+    return base;
+}
+
 typedef UINT64 (*KI_SERVICE)(UINT64, UINT64, UINT64, UINT64);
 
 static KI_SERVICE KiServiceTable[] = {
@@ -164,6 +178,7 @@ static KI_SERVICE KiServiceTable[] = {
     NtSetEvent,              /* 9 */
     NtWaitForSingleObject,   /* 10 */
     NtCreateThread,          /* 11 */
+    NtLoadLibrary,           /* 12 */
 };
 
 #define KI_SERVICE_COUNT (sizeof(KiServiceTable) / sizeof(KiServiceTable[0]))

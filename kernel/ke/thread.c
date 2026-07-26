@@ -53,6 +53,9 @@ void KeInitializeScheduler(void)
     g_current_thread = &g_idle_thread;
     g_next_thread_id = 1;
 
+    /* Give the idle thread a valid FPU/SSE image for the first context switch. */
+    KiSaveFpuState(g_idle_thread.FpuState);
+
     KeLog("[ke]   scheduler ready: System process, idle thread\n");
 }
 
@@ -89,6 +92,10 @@ static PKTHREAD KepAllocThread(const char *name, LONG priority)
     t->ThreadId = g_next_thread_id++;
     t->Name = name;
     t->Process = &g_system_process;
+
+    /* Seed a valid FPU/SSE image (captures the default MXCSR) so the first
+     * FXRSTOR into this thread doesn't fault or load garbage. */
+    KiSaveFpuState(t->FpuState);
     return t;
 }
 
@@ -175,6 +182,12 @@ static void KiSchedule(void)
     if (next->KernelStackBase)
         KeSetKernelStack(next->KernelStackBase + next->KernelStackSize);
     KeSetUserGsBase(next->UserGsBase);
+
+    /* Preserve SSE/x87 state across the switch: save ours, load the incoming
+     * thread's. Done here (not in the asm) because the incoming thread's area
+     * must be restored with a pointer that survives the stack swap. */
+    KiSaveFpuState(prev->FpuState);
+    KiRestoreFpuState(next->FpuState);
 
     KiSwitchContext(&prev->KernelStackPointer, next->KernelStackPointer);
     /* Control returns here only when `prev` is scheduled again. */

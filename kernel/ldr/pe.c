@@ -26,6 +26,7 @@ typedef struct _LDR_LOADED {
     char    Name[32];
     UINT64  Base;
     BOOLEAN Valid;
+    BOOLEAN Linked; /* already threaded onto the process PEB->Ldr list */
 } LDR_LOADED;
 
 #define MAX_LOADED_MODULES 16
@@ -327,17 +328,68 @@ static UINT64 LdrpLoadModule(const char *name)
 /* Process module list (PEB->Ldr)                                     */
 /* ------------------------------------------------------------------ */
 
+/* Persistent state for the process module list, so modules loaded later (via
+ * LoadLibrary) can be appended to the same region. */
+static PPEB_LDR_DATA g_peb_ldr;
+static UINT8 *g_ldr_cursor;
+static UINT8 *g_ldr_end;
+
+/* Append one cached module to the PEB->Ldr lists (bump-allocated from the Ldr
+ * region). Marks it linked so it isn't added twice. */
+static void ldr_link_module(LDR_LOADED *m)
+{
+    if (!g_peb_ldr || m->Linked)
+        return;
+    if (g_ldr_cursor + sizeof(LDR_DATA_TABLE_ENTRY) + 128 > g_ldr_end)
+        return; /* out of room */
+
+    PLDR_DATA_TABLE_ENTRY e = (PLDR_DATA_TABLE_ENTRY)g_ldr_cursor;
+    g_ldr_cursor += sizeof(LDR_DATA_TABLE_ENTRY);
+    memset(e, 0, sizeof(*e));
+
+    PIMAGE_NT_HEADERS64 nt = nt_headers(m->Base);
+    e->DllBase = (PVOID)m->Base;
+    e->EntryPoint = nt ? (PVOID)(m->Base + nt->OptionalHeader.AddressOfEntryPoint)
+                       : NULL;
+    e->SizeOfImage = nt ? nt->OptionalHeader.SizeOfImage : 0;
+
+    /* Widen the ASCII module name into a UTF-16 buffer for BaseDllName. */
+    UINT16 *wname = (UINT16 *)g_ldr_cursor;
+    int n = 0;
+    for (; m->Name[n] && n < 63; n++)
+        wname[n] = (UINT16)(UCHAR)m->Name[n];
+    wname[n] = 0;
+    g_ldr_cursor += (n + 1) * sizeof(UINT16);
+    g_ldr_cursor = (UINT8 *)(((UINT64)g_ldr_cursor + 7) & ~7ULL); /* realign */
+
+    e->BaseDllName.Length = (USHORT)(n * 2);
+    e->BaseDllName.MaximumLength = (USHORT)((n + 1) * 2);
+    e->BaseDllName.Buffer = wname;
+    e->FullDllName = e->BaseDllName;
+
+    InsertTailList(&g_peb_ldr->InLoadOrderModuleList, &e->InLoadOrderLinks);
+    InsertTailList(&g_peb_ldr->InMemoryOrderModuleList, &e->InMemoryOrderLinks);
+    InsertTailList(&g_peb_ldr->InInitializationOrderModuleList,
+                   &e->InInitializationOrderLinks);
+    m->Linked = TRUE;
+}
+
+/* Link any cached-but-not-yet-listed modules (used after a runtime load). */
+static void ldr_sync_module_list(void)
+{
+    for (int i = 0; i < MAX_LOADED_MODULES; i++)
+        if (g_loaded[i].Valid && !g_loaded[i].Linked)
+            ldr_link_module(&g_loaded[i]);
+}
+
 void LdrBuildProcessModuleList(struct _PEB *peb_opaque, UINT64 ldr_va,
                                UINT64 ldr_size)
 {
     PPEB peb = (PPEB)peb_opaque;
 
-    /* Bump-allocate the loader structures out of the user Ldr region. */
-    UINT8 *cursor = (UINT8 *)ldr_va;
-    UINT8 *end = cursor + ldr_size;
-
-    PPEB_LDR_DATA ldr = (PPEB_LDR_DATA)cursor;
-    cursor += sizeof(PEB_LDR_DATA);
+    /* Carve the PEB_LDR_DATA out of the head of the user Ldr region; the rest
+     * of the region bump-allocates the module entries. */
+    PPEB_LDR_DATA ldr = (PPEB_LDR_DATA)ldr_va;
     memset(ldr, 0, sizeof(*ldr));
     ldr->Length = sizeof(PEB_LDR_DATA);
     ldr->Initialized = 1;
@@ -345,48 +397,27 @@ void LdrBuildProcessModuleList(struct _PEB *peb_opaque, UINT64 ldr_va,
     InitializeListHead(&ldr->InMemoryOrderModuleList);
     InitializeListHead(&ldr->InInitializationOrderModuleList);
 
-    int count = 0;
-    for (int i = 0; i < MAX_LOADED_MODULES; i++) {
-        if (!g_loaded[i].Valid)
-            continue;
-        /* Need room for the entry plus a wide name buffer. */
-        if (cursor + sizeof(LDR_DATA_TABLE_ENTRY) + 128 > end)
-            break;
+    g_peb_ldr = ldr;
+    g_ldr_cursor = (UINT8 *)(ldr_va + sizeof(PEB_LDR_DATA));
+    g_ldr_end = (UINT8 *)(ldr_va + ldr_size);
 
-        PLDR_DATA_TABLE_ENTRY e = (PLDR_DATA_TABLE_ENTRY)cursor;
-        cursor += sizeof(LDR_DATA_TABLE_ENTRY);
-        memset(e, 0, sizeof(*e));
-
-        UINT64 mbase = g_loaded[i].Base;
-        PIMAGE_NT_HEADERS64 nt = nt_headers(mbase);
-        e->DllBase = (PVOID)mbase;
-        e->EntryPoint = nt ? (PVOID)(mbase + nt->OptionalHeader.AddressOfEntryPoint)
-                           : NULL;
-        e->SizeOfImage = nt ? nt->OptionalHeader.SizeOfImage : 0;
-
-        /* Widen the ASCII module name into a UTF-16 buffer for BaseDllName. */
-        UINT16 *wname = (UINT16 *)cursor;
-        int n = 0;
-        for (; g_loaded[i].Name[n] && n < 63; n++)
-            wname[n] = (UINT16)(UCHAR)g_loaded[i].Name[n];
-        wname[n] = 0;
-        cursor += (n + 1) * sizeof(UINT16);
-        cursor = (UINT8 *)(((UINT64)cursor + 7) & ~7ULL); /* realign */
-
-        e->BaseDllName.Length = (USHORT)(n * 2);
-        e->BaseDllName.MaximumLength = (USHORT)((n + 1) * 2);
-        e->BaseDllName.Buffer = wname;
-        e->FullDllName = e->BaseDllName;
-
-        InsertTailList(&ldr->InLoadOrderModuleList, &e->InLoadOrderLinks);
-        InsertTailList(&ldr->InMemoryOrderModuleList, &e->InMemoryOrderLinks);
-        InsertTailList(&ldr->InInitializationOrderModuleList,
-                       &e->InInitializationOrderLinks);
-        count++;
-    }
+    ldr_sync_module_list();
 
     peb->Ldr = ldr;
-    KeLog("[ldr]  PEB->Ldr ready: %d modules linked @ %p\n", count, (void *)ldr);
+    KeLog("[ldr]  PEB->Ldr ready @ %p\n", (void *)ldr);
+}
+
+/*
+ * LdrLoadLibrary - load a DLL by name at runtime and link it into PEB->Ldr,
+ * returning its load base (0 on failure). Repeat loads return the cached base.
+ * This is what kernel32's LoadLibraryA reaches through a syscall.
+ */
+UINT64 LdrLoadLibrary(const char *name)
+{
+    UINT64 base = LdrpLoadModule(name);
+    if (base)
+        ldr_sync_module_list(); /* thread the newly-loaded module(s) into Ldr */
+    return base;
 }
 
 /* ------------------------------------------------------------------ */

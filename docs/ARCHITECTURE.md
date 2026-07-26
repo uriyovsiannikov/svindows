@@ -103,9 +103,18 @@ region `PEB->Ldr` points at (`LdrBuildProcessModuleList`). That is what lets the
 `GetModuleHandleA` walks the load-order list, `GetProcAddress` parses the target
 module's PE export directory, and the process heap (`GetProcessHeap` /
 `HeapAlloc` / `HeapFree`, a coalescing free list) runs over
-`NtAllocateVirtualMemory`. SSE is enabled at boot (`CR0.MP`/`CR4.OSFXSR`), since
-compiler-emitted XMM use — pervasive in real Windows binaries — would otherwise
-fault; XMM state is not yet preserved across context switches (see the roadmap).
+`NtAllocateVirtualMemory`. `LoadLibraryA` loads a DLL from disk **at runtime**:
+it calls the kernel loader through an `NtLoadLibrary` service, which maps the
+image, resolves its imports, and appends a new `LDR_DATA_TABLE_ENTRY` to the
+same `PEB->Ldr` region — after which `GetProcAddress` resolves the freshly
+loaded module's exports, exactly as a plugin load works on Windows.
+
+SSE is enabled at boot (`CR0.MP`/`CR4.OSFXSR`), since compiler-emitted XMM use —
+pervasive in real Windows binaries — would otherwise fault, and the context
+switch preserves each thread's x87/SSE state with FXSAVE/FXRSTOR (`KiSchedule`
+saves the outgoing thread's state and restores the incoming thread's, each from
+a 16-byte-aligned per-thread area, so concurrent SSE users don't clobber one
+another).
 
 ## Graphics
 

@@ -88,7 +88,12 @@ The kernel currently:
   `NtAllocateVirtualMemory`). The test program looks a module up by name,
   resolves a function from it by name, calls the resolved pointer, and allocates
   from the heap — the runtime backbone almost every Windows binary relies on.
-  **SSE** is enabled at boot (mandatory on x86-64 and for real Windows code).
+  **`LoadLibraryA`** loads a DLL from disk **at runtime** (via an `NtLoadLibrary`
+  service) and links it into `PEB->Ldr`: the test program loads a standalone
+  `extra.dll` that isn't in its import chain, resolves its exports, and calls
+  them — the way a Windows program loads a plugin. **SSE** is enabled at boot
+  (mandatory on x86-64 and for real Windows code), and the context switch
+  preserves each thread's x87/SSE state with **FXSAVE/FXRSTOR**.
 
 See [`docs/ROADMAP.md`](docs/ROADMAP.md) for what comes next (physical/virtual
 memory manager, object manager, threads & scheduler, system-call boundary, and
@@ -132,7 +137,7 @@ kernel/
   ldr/           Image loader (PE/COFF, imports/exports, loads from disk)
   ps/            Process manager (PEB/TEB, user process creation)
   io/            I/O manager (ATA PIO block driver, FAT32 filesystem)
-user/            User-space sources (ntdll.dll, kernel32.dll, testapp.exe)
+user/            User-space sources (ntdll.dll, kernel32.dll, extra.dll, testapp.exe)
 docs/            architecture notes and roadmap
 scripts/         helper scripts
 ```

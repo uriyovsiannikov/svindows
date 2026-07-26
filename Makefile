@@ -47,6 +47,7 @@ NTDLL      := $(BUILD)/ntdll.dll
 NTDLLLIB   := $(BUILD)/ntdll.lib
 KERNEL32   := $(BUILD)/kernel32.dll
 KERNEL32LIB := $(BUILD)/kernel32.lib
+EXTRA      := $(BUILD)/extra.dll
 DISK       := $(BUILD)/disk.img
 LLDLINK    := lld-link
 CLANGWIN   := clang --target=x86_64-pc-windows-msvc -ffreestanding \
@@ -89,6 +90,15 @@ $(KERNEL32): user/kernel32.c $(NTDLL)
 	           $(BUILD)/kernel32.obj $(NTDLLLIB)
 	@echo "  DLL   $(KERNEL32)"
 
+# extra.dll: a standalone DLL loaded at runtime via LoadLibraryA (not linked
+# into the app's import chain). Distinct preferred base so it never collides.
+$(EXTRA): user/extra.c
+	@mkdir -p $(BUILD)
+	$(CLANGWIN) -c user/extra.c -o $(BUILD)/extra.obj
+	$(LLDLINK) /dll /noentry /machine:x64 /nodefaultlib /base:0x200000000 \
+	           /out:$(EXTRA) /implib:$(BUILD)/extra.lib $(BUILD)/extra.obj
+	@echo "  DLL   $(EXTRA)"
+
 # testapp.exe: a normal Win32 program (C), linked against kernel32.
 $(TESTAPP): user/testapp.c $(KERNEL32)
 	@mkdir -p $(BUILD)
@@ -99,13 +109,14 @@ $(TESTAPP): user/testapp.c $(KERNEL32)
 
 # FAT32 disk image holding the user-space executables, read by the kernel's
 # ATA + FAT drivers at runtime.
-$(DISK): $(TESTAPP) $(KERNEL32) $(NTDLL) user/message.txt
+$(DISK): $(TESTAPP) $(KERNEL32) $(NTDLL) $(EXTRA) user/message.txt
 	@mkdir -p $(BUILD)
 	dd if=/dev/zero of=$(DISK) bs=1M count=64 status=none
 	mformat -i $(DISK) -F -v NTOSDISK ::
 	mcopy -i $(DISK) $(TESTAPP) ::TESTAPP.EXE
 	mcopy -i $(DISK) $(KERNEL32) ::KERNEL32.DLL
 	mcopy -i $(DISK) $(NTDLL) ::NTDLL.DLL
+	mcopy -i $(DISK) $(EXTRA) ::EXTRA.DLL
 	mcopy -i $(DISK) user/message.txt ::MESSAGE.TXT
 	@echo "  DISK  $(DISK)"
 
