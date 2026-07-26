@@ -44,9 +44,9 @@ void PsInitialize(void);
  *   NtWaitForSingleObject(handle)              -> NTSTATUS
  *   NtCreateThread(entry, arg)                 -> thread HANDLE
  */
-UINT64 NtCreateEvent(UINT64 notification, UINT64 initial, UINT64 a3, UINT64 a4);
-UINT64 NtSetEvent(UINT64 handle, UINT64 a2, UINT64 a3, UINT64 a4);
-UINT64 NtWaitForSingleObject(UINT64 handle, UINT64 a2, UINT64 a3, UINT64 a4);
-UINT64 NtCreateThread(UINT64 entry, UINT64 arg, UINT64 a3, UINT64 a4);
+UINT64 NtCreateEvent(UINT64 *args);
+UINT64 NtSetEvent(UINT64 *args);
+UINT64 NtWaitForSingleObject(UINT64 *args);
+UINT64 NtCreateThread(UINT64 *args);
 
 #endif /* _NTOS_PS_H_ */

@@ -10,7 +10,13 @@
 ;
 ;   RAX = service number
 ;   R10, RDX, R8, R9 = arguments 1..4
+;   arguments 5.. are on the user stack at [user_rsp + 0x28] (past the stub's
+;     return address and the 4-slot home space), exactly as in a Windows call
 ;   return value in RAX
+;
+; The entry gathers all arguments into an 11-entry array on the kernel stack and
+; passes its address to KiSystemServiceDispatch(number, args), so services with
+; the real (up to 11-argument) NT signatures get every parameter.
 ;
 ; KPCR layout (see ke/syscall.c): +0 = user RSP scratch, +8 = kernel RSP.
 ; ============================================================================
@@ -39,18 +45,36 @@ KiSystemCallEntry:
     push    rdi
     push    rsi
 
-    ; Marshal the Windows syscall ABI (num=RAX, a1=R10, a2=RDX, a3=R8, a4=R9)
-    ; into the SysV argument registers for
-    ; KiSystemServiceDispatch(num, a1, a2, a3, a4).
-    mov     rdi, rax              ; num -> arg1
-    mov     rsi, r10              ; a1  -> arg2
-    mov     rcx, r8               ; a3  -> arg4 (read R8 before it is overwritten)
-    mov     r8,  r9               ; a4  -> arg5
-    ;   arg3 (RDX) already holds a2
+    ; Build the argument array (11 qwords) on the kernel stack. Interrupts are
+    ; masked (SFMASK clears IF), so [gs:0] is a stable copy of the user RSP.
+    mov     r11, [gs:0]           ; user RSP (base for stack arguments)
+    sub     rsp, 88               ; 11 * 8 bytes
+    mov     [rsp+0x00], r10       ; arg1
+    mov     [rsp+0x08], rdx       ; arg2
+    mov     [rsp+0x10], r8        ; arg3
+    mov     [rsp+0x18], r9        ; arg4
+    ; arguments 5..11 live above the stub's return address + home space.
+    mov     rcx, [r11+0x28]
+    mov     [rsp+0x20], rcx       ; arg5
+    mov     rcx, [r11+0x30]
+    mov     [rsp+0x28], rcx       ; arg6
+    mov     rcx, [r11+0x38]
+    mov     [rsp+0x30], rcx       ; arg7
+    mov     rcx, [r11+0x40]
+    mov     [rsp+0x38], rcx       ; arg8
+    mov     rcx, [r11+0x48]
+    mov     [rsp+0x40], rcx       ; arg9
+    mov     rcx, [r11+0x50]
+    mov     [rsp+0x48], rcx       ; arg10
+    mov     rcx, [r11+0x58]
+    mov     [rsp+0x50], rcx       ; arg11
 
-    sub     rsp, 8                ; realign to 16 (five 8-byte pushes above)
+    mov     rdi, rax              ; num  -> arg1
+    mov     rsi, rsp              ; args -> arg2 (pointer to the array)
+
+    ; Stack is 16-aligned here: 5 pushes (40) + 88 = 128 from a 16-aligned top.
     call    KiSystemServiceDispatch
-    add     rsp, 8
+    add     rsp, 88               ; drop the argument array
     ; return value already in RAX for the user
 
     pop     rsi                   ; restore caller's RSI

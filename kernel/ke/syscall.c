@@ -87,6 +87,8 @@ void KiInitializeSystemCalls(void)
     /* Clear IF, DF, TF on entry: syscalls run non-preemptible for now. */
     wrmsr(MSR_SFMASK, 0x700);
 
+    KiInitializeServiceTable();
+
     KeLog("[ke]   syscall path armed (LSTAR=%p)\n", (void *)&KiSystemCallEntry);
 }
 
@@ -94,29 +96,30 @@ void KiInitializeSystemCalls(void)
 /* Nt* system services                                                */
 /* ------------------------------------------------------------------ */
 
-/* 0: print a NUL-terminated string that lives in user memory. */
-static UINT64 NtDisplayString(UINT64 user_ptr, UINT64 a2, UINT64 a3, UINT64 a4)
+/* Services receive the full argument array (see the syscall entry), so those
+ * with the real, up-to-11-argument NT signatures can read every parameter. */
+
+/* NtDisplayString(PUNICODE-ish ptr) - print a NUL-terminated user string. */
+static UINT64 NtDisplayString(UINT64 *a)
 {
-    (void)a2; (void)a3; (void)a4;
     /* Ring 0 may read the user page directly (same address space). A real
      * implementation would validate and capture the buffer first. */
-    KeLog("[user] %s\n", (const char *)user_ptr);
+    KeLog("[user] %s\n", (const char *)a[0]);
     return 0; /* STATUS_SUCCESS */
 }
 
-/* 1: print an integer argument. */
-static UINT64 NtDisplayNumber(UINT64 value, UINT64 a2, UINT64 a3, UINT64 a4)
+/* NtDisplayNumber(value) - print an integer argument. */
+static UINT64 NtDisplayNumber(UINT64 *a)
 {
-    (void)a2; (void)a3; (void)a4;
     KeLog("[user] NtDisplayNumber: %lu (0x%lx)\n",
-          (unsigned long)value, (unsigned long)value);
+          (unsigned long)a[0], (unsigned long)a[0]);
     return 0;
 }
 
-/* 2: terminate the calling thread; does not return to the caller. */
-static UINT64 NtTerminateThread(UINT64 a1, UINT64 a2, UINT64 a3, UINT64 a4)
+/* NtTerminateThread - end the calling thread; does not return. */
+static UINT64 NtTerminateThread(UINT64 *a)
 {
-    (void)a1; (void)a2; (void)a3; (void)a4;
+    (void)a;
     KeLog("[user] NtTerminateThread requested; ending user thread\n");
     KeTerminateThread();
     return 0; /* unreachable */
@@ -126,74 +129,110 @@ static UINT64 NtTerminateThread(UINT64 a1, UINT64 a2, UINT64 a3, UINT64 a4)
  * stack, and TEB/PEB regions. */
 static UINT64 g_user_alloc_next = 0x0000000020000000ULL;
 
-/* 3: allocate `size` bytes of user memory; returns the base address (or 0). A
- * placeholder for the real NtAllocateVirtualMemory (which takes a base pointer,
- * region size, type, and protection). */
-static UINT64 NtAllocateVirtualMemory(UINT64 size, UINT64 a2, UINT64 a3,
-                                      UINT64 a4)
+/*
+ * NtAllocateVirtualMemory(ProcessHandle, *BaseAddress, ZeroBits, *RegionSize,
+ *                         AllocationType, Protect) -> NTSTATUS.
+ * The real signature: the base and size are in/out pointers. We honor a
+ * requested base of 0 (choose one) and update *BaseAddress; the region grows
+ * from a bump pointer.
+ */
+static UINT64 NtAllocateVirtualMemory(UINT64 *a)
 {
-    (void)a2; (void)a3; (void)a4;
-    if (size == 0)
-        return 0;
+    PVOID   *base_ptr = (PVOID *)a[1];
+    SIZE_T  *size_ptr = (SIZE_T *)a[3];
+    if (!size_ptr || *size_ptr == 0)
+        return (UINT64)STATUS_INVALID_PARAMETER;
 
+    UINT64 size = *size_ptr;
     UINT64 pages = BYTES_TO_PAGES(size);
     UINT64 base = g_user_alloc_next;
     for (UINT64 i = 0; i < pages; i++) {
         UINT64 pa = MmAllocatePage();
         if (pa == MM_INVALID_PHYS)
-            return 0;
+            return (UINT64)STATUS_NO_MEMORY;
         MmMapPage(base + i * PAGE_SIZE, pa, PTE_USER | PTE_WRITE);
     }
     g_user_alloc_next += pages * PAGE_SIZE;
 
+    if (base_ptr)
+        *base_ptr = (PVOID)base;
+    *size_ptr = pages * PAGE_SIZE;
+
     KeLog("[user] NtAllocateVirtualMemory(%lu) -> %p\n",
           (unsigned long)size, (void *)base);
-    return base;
+    return (UINT64)STATUS_SUCCESS;
 }
 
-/* 12: load a DLL by name (user string) at runtime; returns its base or 0. */
-static UINT64 NtLoadLibrary(UINT64 name_ptr, UINT64 a2, UINT64 a3, UINT64 a4)
+/* NtLoadLibrary(name) - load a DLL by name at runtime; returns its base or 0.
+ * (Not a real NT service name; our loader hook for kernel32's LoadLibraryA.) */
+static UINT64 NtLoadLibrary(UINT64 *a)
 {
-    (void)a2; (void)a3; (void)a4;
-    if (name_ptr == 0)
+    if (a[0] == 0)
         return 0;
-    /* Same address space: ring 0 can read the user name string directly. */
-    UINT64 base = LdrLoadLibrary((const char *)name_ptr);
-    KeLog("[user] NtLoadLibrary('%s') -> %p\n", (const char *)name_ptr,
-          (void *)base);
+    UINT64 base = LdrLoadLibrary((const char *)a[0]);
+    KeLog("[user] NtLoadLibrary('%s') -> %p\n", (const char *)a[0], (void *)base);
     return base;
 }
 
-typedef UINT64 (*KI_SERVICE)(UINT64, UINT64, UINT64, UINT64);
+typedef UINT64 (*KI_SERVICE)(UINT64 *args);
 
-static KI_SERVICE KiServiceTable[] = {
-    NtDisplayString,         /* 0 */
-    NtDisplayNumber,         /* 1 */
-    NtTerminateThread,       /* 2 */
-    NtAllocateVirtualMemory, /* 3 */
-    NtCreateFile,            /* 4 */
-    NtReadFile,              /* 5 */
-    NtWriteFile,             /* 6 */
-    NtClose,                 /* 7 */
-    NtCreateEvent,           /* 8 */
-    NtSetEvent,              /* 9 */
-    NtWaitForSingleObject,   /* 10 */
-    NtCreateThread,          /* 11 */
-    NtLoadLibrary,           /* 12 */
-    NtCreateKey,             /* 13 */
-    NtOpenKey,               /* 14 */
-    NtSetValueKey,           /* 15 */
-    NtQueryValueKey,         /* 16 */
-};
+/*
+ * The system service table, indexed by real Windows 7 SP1 x64 syscall numbers
+ * (from the public NT syscall-number tables). Sparse: most slots are unused.
+ * Our ntdll stubs issue these same numbers, and a service's slot holds the
+ * routine implementing it. Aligning to a real build's numbering is what would
+ * let a genuine ntdll drive this kernel; the exact values target Win7 SP1 x64.
+ */
+#define NTOS_MAX_SYSCALL 0x100
+static KI_SERVICE KiServiceTable[NTOS_MAX_SYSCALL];
 
-#define KI_SERVICE_COUNT (sizeof(KiServiceTable) / sizeof(KiServiceTable[0]))
+/* Number assignments (Win7 SP1 x64). Kept together as the single source of
+ * truth, mirrored by the ntdll stubs. */
+#define SN_NtWaitForSingleObject   0x01
+#define SN_NtWriteFile             0x05
+#define SN_NtReadFile              0x03
+#define SN_NtClose                 0x0C
+#define SN_NtOpenKey               0x0F
+#define SN_NtAllocateVirtualMemory 0x15
+#define SN_NtQueryValueKey         0x17
+#define SN_NtCreateKey             0x1A
+#define SN_NtSetEvent              0x02
+#define SN_NtCreateEvent           0x48
+#define SN_NtCreateThread          0x4B
+#define SN_NtCreateFile            0x52
+#define SN_NtSetValueKey           0x5D
+#define SN_NtTerminateThread       0x50
+/* NTOS-private services (no Windows equivalent) live above the real range. */
+#define SN_NtDisplayString         0xF0
+#define SN_NtDisplayNumber         0xF1
+#define SN_NtLoadLibrary           0xF2
 
-UINT64 KiSystemServiceDispatch(UINT64 number, UINT64 a1, UINT64 a2, UINT64 a3,
-                               UINT64 a4)
+void KiInitializeServiceTable(void)
 {
-    if (number >= KI_SERVICE_COUNT) {
-        KeLog("[ke]   invalid system service %lu\n", (unsigned long)number);
+    KiServiceTable[SN_NtWaitForSingleObject]   = NtWaitForSingleObject;
+    KiServiceTable[SN_NtWriteFile]             = NtWriteFile;
+    KiServiceTable[SN_NtReadFile]              = NtReadFile;
+    KiServiceTable[SN_NtClose]                 = NtClose;
+    KiServiceTable[SN_NtOpenKey]               = NtOpenKey;
+    KiServiceTable[SN_NtAllocateVirtualMemory] = NtAllocateVirtualMemory;
+    KiServiceTable[SN_NtQueryValueKey]         = NtQueryValueKey;
+    KiServiceTable[SN_NtCreateKey]             = NtCreateKey;
+    KiServiceTable[SN_NtSetEvent]              = NtSetEvent;
+    KiServiceTable[SN_NtCreateEvent]           = NtCreateEvent;
+    KiServiceTable[SN_NtCreateThread]          = NtCreateThread;
+    KiServiceTable[SN_NtCreateFile]            = NtCreateFile;
+    KiServiceTable[SN_NtSetValueKey]           = NtSetValueKey;
+    KiServiceTable[SN_NtTerminateThread]       = NtTerminateThread;
+    KiServiceTable[SN_NtDisplayString]         = NtDisplayString;
+    KiServiceTable[SN_NtDisplayNumber]         = NtDisplayNumber;
+    KiServiceTable[SN_NtLoadLibrary]           = NtLoadLibrary;
+}
+
+UINT64 KiSystemServiceDispatch(UINT64 number, UINT64 *args)
+{
+    if (number >= NTOS_MAX_SYSCALL || KiServiceTable[number] == NULL) {
+        KeLog("[ke]   invalid system service 0x%lx\n", (unsigned long)number);
         return (UINT64)STATUS_NOT_IMPLEMENTED;
     }
-    return KiServiceTable[number](a1, a2, a3, a4);
+    return KiServiceTable[number](args);
 }

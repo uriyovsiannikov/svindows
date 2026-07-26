@@ -44,18 +44,13 @@ NTSTATUS IoInitialize(void);
 void IoInitializeObjects(void);
 
 /*
- * Handle-based Nt* file services (simplified: names are ASCII, no
- * OBJECT_ATTRIBUTES/UNICODE_STRING yet). Signatures match the syscall
- * dispatcher: (a1, a2, a3, a4), result in the return value.
- *
- *   NtCreateFile(name)                 -> HANDLE (0 on failure)
- *   NtReadFile(handle, buffer, length) -> bytes read
- *   NtWriteFile(handle, buffer, length)-> bytes written
- *   NtClose(handle)                    -> NTSTATUS
+ * Handle-based Nt* file services with the real Windows signatures (via the
+ * argument array the syscall entry passes). See io/file.c for the parameter
+ * layouts (OBJECT_ATTRIBUTES / IO_STATUS_BLOCK).
  */
-UINT64 NtCreateFile(UINT64 name, UINT64 a2, UINT64 a3, UINT64 a4);
-UINT64 NtReadFile(UINT64 handle, UINT64 buffer, UINT64 length, UINT64 a4);
-UINT64 NtWriteFile(UINT64 handle, UINT64 buffer, UINT64 length, UINT64 a4);
-UINT64 NtClose(UINT64 handle, UINT64 a2, UINT64 a3, UINT64 a4);
+UINT64 NtCreateFile(UINT64 *args);
+UINT64 NtReadFile(UINT64 *args);
+UINT64 NtWriteFile(UINT64 *args);
+UINT64 NtClose(UINT64 *args);
 
 #endif /* _NTOS_IO_H_ */

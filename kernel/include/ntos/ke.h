@@ -292,8 +292,9 @@ void KeSetTssRsp0(UINT64 rsp0);
 /* Assembly: drop to ring 3 at `entry` (arg in RCX) with `user_stack`. */
 void KiEnterUserMode(UINT64 entry, UINT64 user_stack, UINT64 arg);
 
-/* The C half of the system-service dispatcher, called from KiSystemCallEntry. */
-UINT64 KiSystemServiceDispatch(UINT64 number, UINT64 a1, UINT64 a2, UINT64 a3,
-                               UINT64 a4);
+/* The C half of the system-service dispatcher, called from KiSystemCallEntry
+ * with the number and a pointer to the marshaled argument array. */
+UINT64 KiSystemServiceDispatch(UINT64 number, UINT64 *args);
+void   KiInitializeServiceTable(void);
 
 #endif /* _NTOS_KE_H_ */

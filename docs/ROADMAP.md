@@ -130,9 +130,18 @@ the kernel allocates from.
       `NtSetValueKey` / `NtQueryValueKey`, and an `advapi32.dll` with the
       `RegOpenKeyExA` / `RegCreateKeyExA` / `RegSetValueExA` / `RegQueryValueExA`
       / `RegCloseKey` surface. (On-disk hives are still future work.)
-- [ ] Grow the Win32 surface (`user32`/`gdi32`, a real CRT, ...) and match the
-      real Windows `Nt*` numbers/signatures so that *unmodified* Windows
-      binaries can run — the ReactOS/Wine-scale endgame.
+- [x] Match the real Windows `Nt*` **signatures and numbers** for the core:
+      the syscall entry marshals up to 11 arguments (registers + user stack),
+      `NtCreateFile`/`NtReadFile`/`NtWriteFile` use `OBJECT_ATTRIBUTES` /
+      `UNICODE_STRING` / `IO_STATUS_BLOCK` at their true arities,
+      `NtAllocateVirtualMemory` is the 6-argument form, and the service table is
+      indexed by Windows 7 SP1 x64 numbers. (Registry/thread services still use
+      simplified signatures; the exact numbers should be checked against a
+      reference table before driving a real ntdll.)
+- [ ] Extend real signatures to the rest (`NtOpenKey`/`NtCreateThreadEx`/...),
+      capture/probe user pointers, and grow the Win32 surface (`user32`/`gdi32`,
+      a real CRT, ...) so that *unmodified* Windows binaries can run — the
+      ReactOS/Wine-scale endgame.
 
 ## Phase 7 — Graphics and the road to a desktop (in progress)
 

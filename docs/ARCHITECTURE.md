@@ -54,6 +54,20 @@ to ring 3. On every context switch the scheduler repoints TSS.RSP0 and the
 KPCR's kernel stack at the incoming thread, so a syscall or interrupt taken from
 ring 3 always lands on that thread's own kernel stack.
 
+**The argument ABI.** The entry marshals the full Windows syscall argument set
+into an array on the kernel stack — arguments 1-4 from `R10`/`RDX`/`R8`/`R9`,
+and arguments 5+ from the user stack at `[user_rsp+0x28]` (past the ntdll stub's
+return address and the four-slot home space), up to 11 — and passes its address
+to `KiSystemServiceDispatch(number, args)`. That lets a service carry its true
+NT signature: `NtCreateFile` reads a `POBJECT_ATTRIBUTES` (whose `UNICODE_STRING`
+names the target) and reports via an `IO_STATUS_BLOCK`, `NtReadFile`/
+`NtWriteFile` take the 9-argument form, and `NtAllocateVirtualMemory` the
+6-argument form. The service table (`ke/syscall.c`) is a sparse array indexed by
+the **real Windows 7 SP1 x64 syscall numbers** — the same numbers the ntdll
+stubs issue — so aligning to a real build's numbering is what would let a
+genuine `ntdll` drive this kernel. NTOS-only services (no Windows equivalent)
+sit above the real range at `0xF0+`.
+
 **GS and the TEB/PEB.** In ring 3 the GS base points at the thread's TEB, so
 native code finds its environment at the usual offsets (`gs:[0x30]` = TEB self,
 `gs:[0x60]` = PEB, whose `ImageBaseAddress` is at +0x10). In the kernel the GS

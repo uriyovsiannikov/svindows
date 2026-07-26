@@ -22,16 +22,90 @@ typedef DWORD (*LPTHREAD_START_ROUTINE)(LPVOID);
 #define WAIT_OBJECT_0     0
 #define HEAP_ZERO_MEMORY  0x00000008
 
-/* Native services imported from ntdll. */
-extern HANDLE    NtCreateFile(const char *name);
-extern ULONGLONG NtWriteFile(HANDLE h, const void *buf, ULONGLONG len);
-extern ULONGLONG NtReadFile(HANDLE h, void *buf, ULONGLONG len);
+typedef unsigned short WCHAR;
+typedef long           NTSTATUS;
+
+/* NT parameter structures (Windows x64 layout). */
+typedef struct _UNICODE_STRING_K { WCHAR Length, MaximumLength; WCHAR *Buffer; }
+    UNICODE_STRING_K; /* note: Buffer sits at +8 by alignment (as on Windows) */
+
+typedef struct _OBJECT_ATTRIBUTES {
+    DWORD             Length;
+    HANDLE            RootDirectory;
+    UNICODE_STRING_K *ObjectName;
+    DWORD             Attributes;
+    void             *SecurityDescriptor;
+    void             *SecurityQualityOfService;
+} OBJECT_ATTRIBUTES;
+
+typedef struct _IO_STATUS_BLOCK {
+    union { NTSTATUS Status; void *Pointer; };
+    ULONGLONG Information;
+} IO_STATUS_BLOCK;
+
+#define FILE_OPEN            1
+#define MEM_COMMIT           0x1000
+#define MEM_RESERVE          0x2000
+#define PAGE_READWRITE       0x04
+#define NT_INVALID_HANDLE    ((HANDLE)(ULONGLONG)-1)
+#define NT_SUCCESS(s)        ((NTSTATUS)(s) >= 0)
+
+/* Native services imported from ntdll, at their real Windows signatures. */
+extern NTSTATUS NtCreateFile(HANDLE *FileHandle, DWORD DesiredAccess,
+                             OBJECT_ATTRIBUTES *ObjectAttributes,
+                             IO_STATUS_BLOCK *IoStatusBlock, void *AllocationSize,
+                             DWORD FileAttributes, DWORD ShareAccess,
+                             DWORD CreateDisposition, DWORD CreateOptions,
+                             void *EaBuffer, DWORD EaLength);
+extern NTSTATUS NtReadFile(HANDLE File, HANDLE Event, void *ApcRoutine,
+                           void *ApcContext, IO_STATUS_BLOCK *IoStatusBlock,
+                           void *Buffer, DWORD Length, void *ByteOffset,
+                           void *Key);
+extern NTSTATUS NtWriteFile(HANDLE File, HANDLE Event, void *ApcRoutine,
+                            void *ApcContext, IO_STATUS_BLOCK *IoStatusBlock,
+                            const void *Buffer, DWORD Length, void *ByteOffset,
+                            void *Key);
+extern NTSTATUS NtAllocateVirtualMemory(HANDLE Process, void **BaseAddress,
+                                        ULONGLONG ZeroBits, ULONGLONG *RegionSize,
+                                        DWORD AllocationType, DWORD Protect);
 extern long      NtClose(HANDLE h);
 extern HANDLE    NtCreateThread(LPVOID entry, LPVOID arg);
 extern long      NtWaitForSingleObject(HANDLE h);
 extern void      NtTerminateThread(void);
-extern ULONGLONG NtAllocateVirtualMemory(ULONGLONG size);
 extern HANDLE    NtLoadLibrary(const char *name);
+
+void *memset(void *dst, int v, SIZE_T n); /* defined below */
+
+/* Allocate `bytes` of committed user memory (returns 0 on failure). */
+static void *nt_alloc(ULONGLONG bytes)
+{
+    void *base = 0;
+    ULONGLONG size = bytes;
+    NTSTATUS st = NtAllocateVirtualMemory(NT_INVALID_HANDLE, &base, 0, &size,
+                                          MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    return NT_SUCCESS(st) ? base : 0;
+}
+
+/* Open a file or namespace object by ASCII name via the real NtCreateFile. */
+static HANDLE nt_open(const char *name)
+{
+    WCHAR wname[260];
+    int n = 0;
+    for (; name[n] && n < 259; n++)
+        wname[n] = (WCHAR)(unsigned char)name[n];
+    wname[n] = 0;
+
+    UNICODE_STRING_K us = { (WCHAR)(n * 2), (WCHAR)(n * 2 + 2), wname };
+    OBJECT_ATTRIBUTES oa;
+    memset(&oa, 0, sizeof(oa));
+    oa.Length = sizeof(oa);
+    oa.ObjectName = &us;
+
+    HANDLE h = 0;
+    IO_STATUS_BLOCK iosb;
+    NTSTATUS st = NtCreateFile(&h, 0, &oa, &iosb, 0, 0, 0, FILE_OPEN, 0, 0, 0);
+    return NT_SUCCESS(st) ? h : NT_INVALID_HANDLE;
+}
 
 /* ------------------------------------------------------------------ */
 /* Freestanding helpers (no CRT)                                      */
@@ -212,27 +286,29 @@ __declspec(dllexport) FARPROC GetProcAddress(HANDLE module, const char *name)
 __declspec(dllexport) HANDLE GetStdHandle(DWORD which)
 {
     (void)which; /* every standard handle maps to the console for now */
-    return NtCreateFile("\\Device\\Console");
+    return nt_open("\\Device\\Console");
 }
 
 __declspec(dllexport) BOOL WriteFile(HANDLE h, const void *buffer, DWORD len,
                                      DWORD *written, LPVOID overlapped)
 {
     (void)overlapped;
-    ULONGLONG n = NtWriteFile(h, buffer, len);
+    IO_STATUS_BLOCK iosb;
+    NTSTATUS st = NtWriteFile(h, 0, 0, 0, &iosb, buffer, len, 0, 0);
     if (written)
-        *written = (DWORD)n;
-    return 1;
+        *written = (DWORD)iosb.Information;
+    return NT_SUCCESS(st);
 }
 
 __declspec(dllexport) BOOL ReadFile(HANDLE h, void *buffer, DWORD len,
                                     DWORD *read, LPVOID overlapped)
 {
     (void)overlapped;
-    ULONGLONG n = NtReadFile(h, buffer, len);
+    IO_STATUS_BLOCK iosb;
+    NTSTATUS st = NtReadFile(h, 0, 0, 0, &iosb, buffer, len, 0, 0);
     if (read)
-        *read = (DWORD)n;
-    return 1;
+        *read = (DWORD)iosb.Information;
+    return NT_SUCCESS(st);
 }
 
 __declspec(dllexport) HANDLE CreateFileA(const char *name, DWORD access,
@@ -240,7 +316,7 @@ __declspec(dllexport) HANDLE CreateFileA(const char *name, DWORD access,
                                          DWORD flags, HANDLE templ)
 {
     (void)access; (void)share; (void)sa; (void)disp; (void)flags; (void)templ;
-    return NtCreateFile(name);
+    return nt_open(name);
 }
 
 __declspec(dllexport) BOOL CloseHandle(HANDLE h)
@@ -280,8 +356,7 @@ __declspec(dllexport) HANDLE CreateThread(LPVOID sa, ULONGLONG stack_size,
                                           LPVOID param, DWORD flags, DWORD *tid)
 {
     (void)sa; (void)stack_size; (void)flags; (void)tid;
-    THREAD_INFO *info = (THREAD_INFO *)(LPVOID)(ULONGLONG)
-        NtAllocateVirtualMemory(sizeof(THREAD_INFO));
+    THREAD_INFO *info = (THREAD_INFO *)nt_alloc(sizeof(THREAD_INFO));
     if (!info)
         return 0;
     info->Start = start;
@@ -323,7 +398,7 @@ __declspec(dllexport) HANDLE HeapCreate(DWORD flags, SIZE_T initial, SIZE_T max)
     ULONGLONG region = initial ? align_up8(initial) : 0x10000; /* >=64 KiB */
     region += sizeof(HEAP) + sizeof(BLOCK);
 
-    void *mem = (void *)(ULONGLONG)NtAllocateVirtualMemory(region);
+    void *mem = nt_alloc(region);
     if (!mem)
         return 0;
 

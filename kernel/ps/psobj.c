@@ -38,9 +38,9 @@ void PsInitialize(void)
 /* Events                                                             */
 /* ------------------------------------------------------------------ */
 
-UINT64 NtCreateEvent(UINT64 notification, UINT64 initial, UINT64 a3, UINT64 a4)
+UINT64 NtCreateEvent(UINT64 *a)
 {
-    (void)a3; (void)a4;
+    UINT64 notification = a[0], initial = a[1];
 
     POBJECT obj;
     if (!NT_SUCCESS(ObCreateObject(g_event_type, sizeof(KEVENT), &obj)))
@@ -56,9 +56,9 @@ UINT64 NtCreateEvent(UINT64 notification, UINT64 initial, UINT64 a3, UINT64 a4)
     return (UINT64)(ULONG_PTR)h;
 }
 
-UINT64 NtSetEvent(UINT64 handle, UINT64 a2, UINT64 a3, UINT64 a4)
+UINT64 NtSetEvent(UINT64 *a)
 {
-    (void)a2; (void)a3; (void)a4;
+    UINT64 handle = a[0];
 
     POBJECT obj;
     if (!NT_SUCCESS(ObReferenceObjectByHandle((HANDLE)(ULONG_PTR)handle, 0,
@@ -74,9 +74,9 @@ UINT64 NtSetEvent(UINT64 handle, UINT64 a2, UINT64 a3, UINT64 a4)
 /* Waiting                                                            */
 /* ------------------------------------------------------------------ */
 
-UINT64 NtWaitForSingleObject(UINT64 handle, UINT64 a2, UINT64 a3, UINT64 a4)
+UINT64 NtWaitForSingleObject(UINT64 *a)
 {
-    (void)a2; (void)a3; (void)a4;
+    UINT64 handle = a[0];
 
     POBJECT obj;
     if (!NT_SUCCESS(ObReferenceObjectByHandle((HANDLE)(ULONG_PTR)handle, 0, NULL,
@@ -113,9 +113,9 @@ static UINT64 map_user_pages(SIZE_T pages)
     return base;
 }
 
-UINT64 NtCreateThread(UINT64 entry, UINT64 arg, UINT64 a3, UINT64 a4)
+UINT64 NtCreateThread(UINT64 *a)
 {
-    (void)a3; (void)a4;
+    UINT64 entry = a[0], arg = a[1];
 
     /* Stack + TEB for the new thread. */
     UINT64 stack_base = map_user_pages(THREAD_STACK_PAGES);

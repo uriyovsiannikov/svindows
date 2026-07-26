@@ -23,20 +23,23 @@ global %1
     ret
 %endmacro
 
-SYSCALL_STUB NtDisplayString,         0
-SYSCALL_STUB NtDisplayNumber,         1
-SYSCALL_STUB NtTerminateThread,       2
-SYSCALL_STUB NtAllocateVirtualMemory, 3
-SYSCALL_STUB NtCreateFile,            4
-SYSCALL_STUB NtReadFile,              5
-SYSCALL_STUB NtWriteFile,             6
-SYSCALL_STUB NtClose,                 7
-SYSCALL_STUB NtCreateEvent,           8
-SYSCALL_STUB NtSetEvent,              9
-SYSCALL_STUB NtWaitForSingleObject,   10
-SYSCALL_STUB NtCreateThread,          11
-SYSCALL_STUB NtLoadLibrary,           12
-SYSCALL_STUB NtCreateKey,             13
-SYSCALL_STUB NtOpenKey,               14
-SYSCALL_STUB NtSetValueKey,           15
-SYSCALL_STUB NtQueryValueKey,         16
+; Service numbers target Windows 7 SP1 x64 (public NT syscall-number tables);
+; the kernel's KiServiceTable is indexed by the same values. Private NTOS-only
+; services (no Windows equivalent) sit above the real range at 0xF0+.
+SYSCALL_STUB NtWaitForSingleObject,   0x01
+SYSCALL_STUB NtSetEvent,              0x02
+SYSCALL_STUB NtReadFile,              0x03
+SYSCALL_STUB NtWriteFile,             0x05
+SYSCALL_STUB NtClose,                 0x0C
+SYSCALL_STUB NtOpenKey,               0x0F
+SYSCALL_STUB NtAllocateVirtualMemory, 0x15
+SYSCALL_STUB NtQueryValueKey,         0x17
+SYSCALL_STUB NtCreateKey,             0x1A
+SYSCALL_STUB NtCreateEvent,           0x48
+SYSCALL_STUB NtCreateThread,          0x4B
+SYSCALL_STUB NtTerminateThread,       0x50
+SYSCALL_STUB NtCreateFile,            0x52
+SYSCALL_STUB NtSetValueKey,           0x5D
+SYSCALL_STUB NtDisplayString,         0xF0
+SYSCALL_STUB NtDisplayNumber,         0xF1
+SYSCALL_STUB NtLoadLibrary,           0xF2

@@ -102,6 +102,15 @@ The kernel currently:
   `RegQueryValueExA` / `RegCloseKey` on top; the test program reads a preset
   value under `HKLM\Software\NTOS` and creates a key, writes a value, and reads
   it back under `HKCU`.
+- **Speaks the real NT system-call ABI.** The syscall entry marshals the full
+  Windows argument set (four registers plus stack arguments at `[rsp+0x28]`, up
+  to 11), so services carry their true NT signatures: `NtCreateFile` takes a
+  `POBJECT_ATTRIBUTES` (with a `UNICODE_STRING` name) and reports through an
+  `IO_STATUS_BLOCK`, `NtReadFile`/`NtWriteFile` use the 9-argument form, and
+  `NtAllocateVirtualMemory` the 6-argument form. The service table is indexed by
+  the **real Windows 7 SP1 x64 syscall numbers**, and kernel32 builds these
+  structures exactly as the real one does — a concrete step toward one day
+  driving the kernel with an unmodified `ntdll`.
 
 See [`docs/ROADMAP.md`](docs/ROADMAP.md) for what comes next (physical/virtual
 memory manager, object manager, threads & scheduler, system-call boundary, and

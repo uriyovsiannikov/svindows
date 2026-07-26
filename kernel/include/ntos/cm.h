@@ -40,10 +40,10 @@ typedef struct _CM_QUERY_VALUE {
  * hive (\Registry\Machine\Software\NTOS with a couple of values). */
 void CmInitialize(void);
 
-/* Nt* registry services (signatures match the syscall dispatcher). */
-UINT64 NtCreateKey(UINT64 parent_handle, UINT64 name_ptr, UINT64 a3, UINT64 a4);
-UINT64 NtOpenKey(UINT64 parent_handle, UINT64 name_ptr, UINT64 a3, UINT64 a4);
-UINT64 NtSetValueKey(UINT64 handle, UINT64 param_ptr, UINT64 a3, UINT64 a4);
-UINT64 NtQueryValueKey(UINT64 handle, UINT64 param_ptr, UINT64 a3, UINT64 a4);
+/* Nt* registry services (take the syscall argument array). */
+UINT64 NtCreateKey(UINT64 *args);
+UINT64 NtOpenKey(UINT64 *args);
+UINT64 NtSetValueKey(UINT64 *args);
+UINT64 NtQueryValueKey(UINT64 *args);
 
 #endif /* _NTOS_CM_H_ */

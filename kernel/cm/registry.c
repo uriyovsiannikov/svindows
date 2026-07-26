@@ -210,9 +210,10 @@ static CM_KEY *cm_key_from_handle(UINT64 handle)
 /* Nt* services                                                       */
 /* ------------------------------------------------------------------ */
 
-UINT64 NtCreateKey(UINT64 parent_handle, UINT64 name_ptr, UINT64 a3, UINT64 a4)
+/* NtCreateKey(parent_handle, name) - simplified (no OBJECT_ATTRIBUTES yet). */
+UINT64 NtCreateKey(UINT64 *a)
 {
-    (void)a3; (void)a4;
+    UINT64 parent_handle = a[0], name_ptr = a[1];
     CM_KEY *parent = cm_key_from_handle(parent_handle);
     if (!parent || name_ptr == 0)
         return 0;
@@ -225,9 +226,9 @@ UINT64 NtCreateKey(UINT64 parent_handle, UINT64 name_ptr, UINT64 a3, UINT64 a4)
     return h;
 }
 
-UINT64 NtOpenKey(UINT64 parent_handle, UINT64 name_ptr, UINT64 a3, UINT64 a4)
+UINT64 NtOpenKey(UINT64 *a)
 {
-    (void)a3; (void)a4;
+    UINT64 parent_handle = a[0], name_ptr = a[1];
     CM_KEY *parent = cm_key_from_handle(parent_handle);
     if (!parent || name_ptr == 0)
         return 0;
@@ -242,9 +243,9 @@ UINT64 NtOpenKey(UINT64 parent_handle, UINT64 name_ptr, UINT64 a3, UINT64 a4)
     return h;
 }
 
-UINT64 NtSetValueKey(UINT64 handle, UINT64 param_ptr, UINT64 a3, UINT64 a4)
+UINT64 NtSetValueKey(UINT64 *a)
 {
-    (void)a3; (void)a4;
+    UINT64 handle = a[0], param_ptr = a[1];
     CM_KEY *k = cm_key_from_handle(handle);
     if (!k || param_ptr == 0)
         return (UINT64)STATUS_INVALID_HANDLE;
@@ -255,9 +256,9 @@ UINT64 NtSetValueKey(UINT64 handle, UINT64 param_ptr, UINT64 a3, UINT64 a4)
     return (UINT64)st;
 }
 
-UINT64 NtQueryValueKey(UINT64 handle, UINT64 param_ptr, UINT64 a3, UINT64 a4)
+UINT64 NtQueryValueKey(UINT64 *a)
 {
-    (void)a3; (void)a4;
+    UINT64 handle = a[0], param_ptr = a[1];
     CM_KEY *k = cm_key_from_handle(handle);
     if (!k || param_ptr == 0)
         return (UINT64)STATUS_INVALID_HANDLE;
