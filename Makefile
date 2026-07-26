@@ -37,16 +37,19 @@ C_SRC   := $(shell find kernel -name '*.c')
 ASM_SRC := $(shell find kernel -name '*.asm')
 OBJ     := $(patsubst %,$(BUILD)/%.o,$(C_SRC) $(ASM_SRC))
 
-# User-space images, built as real PE32+ files and embedded in the kernel image
-# (see kernel/ldr/testpe.asm): ntdll.dll (exports the Nt* syscall stubs) and
+# User-space images, built as real PE32+ files and placed on a FAT disk image
+# the kernel reads at runtime: ntdll.dll (exports the Nt* syscall stubs) and
 # testapp.exe (imports them).
 TESTAPP  := $(BUILD)/testapp.exe
 NTDLL    := $(BUILD)/ntdll.dll
 NTDLLLIB := $(BUILD)/ntdll.lib
+DISK     := $(BUILD)/disk.img
 LLDLINK  := lld-link
 
 QEMU        := qemu-system-x86_64
-QEMUFLAGS   := -m 256M -no-reboot -no-shutdown
+# -boot d forces booting from the CD-ROM (the ISO); the hard disk is data only.
+QEMUFLAGS   := -m 256M -no-reboot -no-shutdown -boot d
+QEMUDISK    := -drive file=$(DISK),format=raw,if=ide,index=0,media=disk
 
 .PHONY: all iso run run-gui clean
 
@@ -76,8 +79,15 @@ $(TESTAPP): user/testapp.asm $(NTDLL)
 	           /out:$@ $(BUILD)/testapp.obj $(NTDLLLIB)
 	@echo "  PE    $@"
 
-# The embedding stub incbin's both images, so they must exist before assembly.
-$(BUILD)/kernel/ldr/testpe.asm.o: $(TESTAPP) $(NTDLL)
+# FAT32 disk image holding the user-space executables, read by the kernel's
+# ATA + FAT drivers at runtime.
+$(DISK): $(TESTAPP) $(NTDLL)
+	@mkdir -p $(BUILD)
+	dd if=/dev/zero of=$(DISK) bs=1M count=64 status=none
+	mformat -i $(DISK) -F -v NTOSDISK ::
+	mcopy -i $(DISK) $(TESTAPP) ::TESTAPP.EXE
+	mcopy -i $(DISK) $(NTDLL) ::NTDLL.DLL
+	@echo "  DISK  $(DISK)"
 
 $(KERNEL): $(OBJ) kernel/arch/x86_64/linker.ld
 	@mkdir -p $(dir $@)
@@ -93,11 +103,11 @@ $(ISO): $(KERNEL) boot/grub.cfg
 	grub-mkrescue -o $@ $(BUILD)/isodir 2>/dev/null
 	@echo "  ISO   $@"
 
-run: $(ISO)
-	$(QEMU) $(QEMUFLAGS) -cdrom $(ISO) -serial stdio -display none
+run: $(ISO) $(DISK)
+	$(QEMU) $(QEMUFLAGS) -cdrom $(ISO) $(QEMUDISK) -serial stdio -display none
 
-run-gui: $(ISO)
-	$(QEMU) $(QEMUFLAGS) -cdrom $(ISO) -serial stdio
+run-gui: $(ISO) $(DISK)
+	$(QEMU) $(QEMUFLAGS) -cdrom $(ISO) $(QEMUDISK) -serial stdio
 
 clean:
 	rm -rf $(BUILD)

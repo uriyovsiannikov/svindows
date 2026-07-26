@@ -73,10 +73,15 @@ the kernel allocates from.
 - [ ] Match the real Windows `Nt*` numbers/signatures and grow the set
       (`NtCreateFile`, `NtWriteFile`, `NtCreateThread`, ...).
 
-## Phase 5 — I/O manager (`Io`)
+## Phase 5 — I/O manager (`Io`) (in progress)
 
-- [ ] Device / driver objects, IRP model.
-- [ ] A RAM-disk and a simple file system (FAT) for loading binaries.
+- [x] A polled **ATA PIO** block driver (primary bus, 28-bit LBA).
+- [x] A read-only **FAT32** driver (BPB, FAT chain, root directory, 8.3 names).
+- [x] The loader reads `testapp.exe` and its `ntdll.dll` dependency **from a
+      disk image** instead of embedded blobs.
+- [ ] Device / driver objects and the IRP model (currently direct calls).
+- [ ] Write support; a real file API (`NtCreateFile` / `NtReadFile`) over the
+      object manager and handles.
 
 ## Phase 6 — The NT user-mode boundary (in progress)
 

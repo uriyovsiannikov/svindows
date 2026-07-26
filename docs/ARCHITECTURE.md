@@ -88,7 +88,7 @@ The directory names match NT's internal prefixes, so a symbol like
 | `Mm`   | `mm/`     | physical & virtual memory, direct map, page tables         | working |
 | `Ob`   | `ob/`     | object manager: object types, handles, namespace           | working |
 | `Ps`   | `ps/`     | processes and threads (PEB/TEB, user process creation)     | early |
-| `Io`   | `io/`     | I/O manager, device/driver model, IRPs                     | stub  |
+| `Io`   | `io/`     | ATA PIO block driver, FAT32 read-only filesystem           | early |
 | `Ex`   | `ex/`     | executive support: pool allocator, sync primitives         | early |
 | `Ldr`  | `ldr/`    | PE/COFF image loader                                       | early |
 | `Rtl`  | `rtl/`    | runtime library: strings, memory, lists, formatting        | early |

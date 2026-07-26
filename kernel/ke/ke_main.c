@@ -14,13 +14,10 @@
 #include <ntos/ob.h>
 #include <ntos/ldr.h>
 #include <ntos/ps.h>
+#include <ntos/io.h>
 #include <ntos/rtl.h>
 
-#define NTOS_VERSION "0.5.0"
-
-/* The embedded test PE executable (see kernel/ldr/testpe.asm). */
-extern char TestappImageStart[];
-extern char TestappImageEnd[];
+#define NTOS_VERSION "0.6.0"
 
 /* User stack for the loaded program (grows down from the top). */
 #define USER_STACK_TOP   0x0000000010010000ULL
@@ -189,21 +186,24 @@ void KiSystemStartup(UINT32 magic, UINT32 mbi_phys)
     ObInitialize();
     ObjectManagerDemo();
 
-    /* Phase 6: load a PE executable, link its ntdll imports, and run it. */
-    KeLog("[test] --- loading a PE that imports Nt* from ntdll ---\n");
+    /* Phase 5/6: mount the disk, then load a PE from it and run it. */
+    KeLog("[io]   bringing up disk and filesystem...\n");
+    NTSTATUS io = IoInitialize();
+    if (!NT_SUCCESS(io))
+        KeLog("[io]   WARNING: no filesystem (status 0x%08x)\n", (unsigned)io);
+
+    KeLog("[test] --- loading testapp.exe from disk ---\n");
     KeInitializeScheduler();
 
     UINT64 pe_entry, pe_base;
-    NTSTATUS st = LdrLoadExecutable(TestappImageStart,
-                                    (SIZE_T)(TestappImageEnd - TestappImageStart),
-                                    &pe_entry, &pe_base);
+    NTSTATUS st = LdrLoadExecutable("testapp.exe", &pe_entry, &pe_base);
     if (NT_SUCCESS(st)) {
         UINT64 stack_top = SetupUserStack();
         UINT64 stack_base = USER_STACK_TOP - USER_STACK_PAGES * PAGE_SIZE;
         PsCreateUserProcess("testapp.exe", pe_entry, pe_base, stack_base,
                             stack_top);
     } else {
-        KeLog("[test] failed to load PE: status 0x%08x\n", (unsigned)st);
+        KeLog("[test] failed to load testapp.exe: status 0x%08x\n", (unsigned)st);
     }
 
     KeCreateThread("KWorker", DemoWorker, (PVOID)"KWorker", 8);

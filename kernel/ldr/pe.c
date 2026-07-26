@@ -8,32 +8,27 @@
  *      addresses,
  *   3. tighten page permissions per section.
  *
- * Dependency DLLs are found in a small in-kernel module registry backed by the
- * images embedded in the kernel (kernel/ldr/testpe.asm), standing in for a
- * filesystem until there is one.
+ * Executables and their dependency DLLs (ntdll) are read from the mounted
+ * filesystem by name; a small cache tracks what is already loaded.
  */
 #include <ntos/ldr.h>
 #include <ntos/mm.h>
 #include <ntos/ke.h>
 #include <ntos/rtl.h>
+#include <ntos/io.h>
+#include <ntos/ex.h>
 #include <nt/pe.h>
 
-/* Embedded module images. */
-extern char NtdllImageStart[];
-extern char NtdllImageEnd[];
+/* Cache of already-loaded modules (name -> load base). Satisfies repeat imports
+ * and breaks import cycles. */
+typedef struct _LDR_LOADED {
+    char    Name[32];
+    UINT64  Base;
+    BOOLEAN Valid;
+} LDR_LOADED;
 
-typedef struct _LDR_MODULE {
-    const char *Name;
-    const char *Start;
-    const char *End;
-    UINT64      Base;
-    BOOLEAN     Loaded;
-} LDR_MODULE;
-
-static LDR_MODULE g_modules[] = {
-    { "ntdll.dll", NtdllImageStart, NtdllImageEnd, 0, FALSE },
-};
-#define MODULE_COUNT (sizeof(g_modules) / sizeof(g_modules[0]))
+#define MAX_LOADED_MODULES 16
+static LDR_LOADED g_loaded[MAX_LOADED_MODULES];
 
 /* Case-insensitive ASCII compare (DLL names are matched loosely). */
 static int ci_strcmp(const char *a, const char *b)
@@ -274,43 +269,75 @@ static NTSTATUS LdrResolveImports(UINT64 base)
     return STATUS_SUCCESS;
 }
 
+static UINT64 lookup_module(const char *name)
+{
+    for (int i = 0; i < MAX_LOADED_MODULES; i++)
+        if (g_loaded[i].Valid && ci_strcmp(name, g_loaded[i].Name) == 0)
+            return g_loaded[i].Base;
+    return 0;
+}
+
+static void remember_module(const char *name, UINT64 base)
+{
+    for (int i = 0; i < MAX_LOADED_MODULES; i++) {
+        if (g_loaded[i].Valid)
+            continue;
+        int j = 0;
+        for (; j < 31 && name[j]; j++)
+            g_loaded[i].Name[j] = name[j];
+        g_loaded[i].Name[j] = 0;
+        g_loaded[i].Base = base;
+        g_loaded[i].Valid = TRUE;
+        return;
+    }
+}
+
+/* Load a dependency module by name from disk (or return the cached base). */
 static UINT64 LdrpLoadModule(const char *name)
 {
-    for (SIZE_T i = 0; i < MODULE_COUNT; i++) {
-        LDR_MODULE *m = &g_modules[i];
-        if (ci_strcmp(name, m->Name) != 0)
-            continue;
-        if (m->Loaded)
-            return m->Base;
+    UINT64 existing = lookup_module(name);
+    if (existing)
+        return existing;
 
-        UINT64 base;
-        SIZE_T size = (SIZE_T)(m->End - m->Start);
-        if (!NT_SUCCESS(LdrpMapImage(m->Start, size, &base)))
-            return 0;
-
-        /* Mark loaded before resolving to break any import cycles. */
-        m->Base = base;
-        m->Loaded = TRUE;
-
-        if (!NT_SUCCESS(LdrResolveImports(base)))
-            return 0;
-        LdrpProtectImage(base);
-
-        KeLog("[ldr]  loaded module %s at %p\n", m->Name, (void *)base);
-        return base;
+    void *buf;
+    SIZE_T size;
+    if (!NT_SUCCESS(FatLoadFile(name, &buf, &size))) {
+        KeLog("[ldr]  dependency '%s' not found on disk\n", name);
+        return 0;
     }
-    return 0;
+
+    UINT64 base;
+    NTSTATUS status = LdrpMapImage(buf, size, &base);
+    ExFreePool(buf); /* mapped into user pages; the file buffer is done */
+    if (!NT_SUCCESS(status))
+        return 0;
+
+    remember_module(name, base); /* cache before resolving to break cycles */
+
+    if (!NT_SUCCESS(LdrResolveImports(base)))
+        return 0;
+    LdrpProtectImage(base);
+
+    KeLog("[ldr]  loaded module %s at %p\n", name, (void *)base);
+    return base;
 }
 
 /* ------------------------------------------------------------------ */
 /* Public entry point                                                 */
 /* ------------------------------------------------------------------ */
 
-NTSTATUS LdrLoadExecutable(const void *file, SIZE_T file_size,
-                           UINT64 *entry_out, UINT64 *base_out)
+NTSTATUS LdrLoadExecutable(const char *filename, UINT64 *entry_out,
+                           UINT64 *base_out)
 {
+    void *buf;
+    SIZE_T size;
+    NTSTATUS status = FatLoadFile(filename, &buf, &size);
+    if (!NT_SUCCESS(status))
+        return status;
+
     UINT64 base;
-    NTSTATUS status = LdrpMapImage(file, file_size, &base);
+    status = LdrpMapImage(buf, size, &base);
+    ExFreePool(buf);
     if (!NT_SUCCESS(status))
         return status;
 

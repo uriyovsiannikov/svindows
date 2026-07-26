@@ -50,6 +50,9 @@ The kernel currently:
   TEB through `gs:[0x30]` and its PEB through `gs:[0x60]` (a correct swapgs
   model keeps GS consistent across ring transitions and preemption), and can
   request memory with a real `NtAllocateVirtualMemory` service.
+- **Loads executables from a disk**: a polled **ATA PIO** driver and a read-only
+  **FAT32** filesystem read `testapp.exe` and its `ntdll.dll` dependency off a
+  disk image at runtime — no longer embedded in the kernel.
 
 See [`docs/ROADMAP.md`](docs/ROADMAP.md) for what comes next (physical/virtual
 memory manager, object manager, threads & scheduler, system-call boundary, and
@@ -61,17 +64,19 @@ You need a Linux host with:
 
 - `gcc` (or `clang`), `ld`, `nasm`
 - `grub-mkrescue` + `xorriso` (to build the bootable ISO)
-- `qemu-system-x86_64` (to run it)
+- `mtools` (to build the FAT disk image), `qemu-system-x86_64` (to run it)
 
 ```sh
 make            # build kernel/ntoskrnl.elf
 make iso        # build build/ntos.iso
-make run        # build the ISO and boot it in QEMU (serial on stdout)
+make run        # build the ISO + FAT disk and boot in QEMU (serial on stdout)
 make run-gui    # same, but with a QEMU graphical window
 ```
 
-`make run` boots headless and prints the kernel log to your terminal via the
-emulated serial port, which is the easiest way to see what the kernel is doing.
+`make run` boots headless from the ISO and prints the kernel log to your
+terminal via the emulated serial port. The user-space executables live on a
+separate FAT32 disk image (`build/disk.img`, built from `user/*.asm`) that the
+kernel's ATA + FAT drivers read at runtime.
 
 ## Layout
 
@@ -88,9 +93,9 @@ kernel/
   mm/            Memory Manager (multiboot map, PMM, page tables, direct map)
   ex/            Executive support (pool allocator)
   ob/            Object Manager (types, handles, namespace)
-  ldr/           Image loader (PE/COFF, imports/exports) + embedded images
+  ldr/           Image loader (PE/COFF, imports/exports, loads from disk)
   ps/            Process manager (PEB/TEB, user process creation)
-  io/            I/O manager (stub, being filled in)
+  io/            I/O manager (ATA PIO block driver, FAT32 filesystem)
 user/            Native user-space sources (ntdll.dll, testapp.exe)
 docs/            architecture notes and roadmap
 scripts/         helper scripts
