@@ -149,9 +149,15 @@ the kernel allocates from.
       and `NtWaitForSingleObject` takes alertable+timeout; the kernel validates
       user buffers (`MmProbeForRead`/`MmProbeForWrite`) and captures object names
       (`MmCaptureUnicodeName`) before use.
-- [ ] Grow the Win32 surface (`user32`/`gdi32` with a window/compositor stack, a
-      fuller CRT, ...) and add kernel SEH so probes are fault-safe, so that
-      *unmodified* Windows binaries can run — the ReactOS/Wine-scale endgame.
+- [x] A **CRT startup** (`crt0.c`'s `mainCRTStartup`) + minimal libc headers, so
+      a plain portable C program (`int main()`, `<stdio.h>`/`<stdlib.h>`/
+      `<string.h>`, no OS-specific code) compiles and runs unchanged (`hello.exe`).
+- [ ] Grow toward running *unmodified, ready-made* Windows binaries: a fuller
+      Win32/CRT surface (VirtualAlloc/VirtualProtect, TLS, critical sections,
+      GetLastError, ...), TLS-directory + load-config (security cookie) handling
+      in the loader, kernel SEH (`.pdata`/`RUNTIME_FUNCTION`) so exceptions and
+      fault-safe probes work, and eventually `user32`/`gdi32` for GUI programs —
+      the ReactOS/Wine-scale endgame that leads to a real desktop shell.
 
 ## Phase 7 — Graphics and the road to a desktop (in progress)
 

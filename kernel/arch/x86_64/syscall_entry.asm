@@ -45,36 +45,26 @@ KiSystemCallEntry:
     push    rdi
     push    rsi
 
-    ; Build the argument array (11 qwords) on the kernel stack. Interrupts are
-    ; masked (SFMASK clears IF), so [gs:0] is a stable copy of the user RSP.
-    mov     r11, [gs:0]           ; user RSP (base for stack arguments)
-    sub     rsp, 88               ; 11 * 8 bytes
+    ; Put the four register arguments in an array on the kernel stack, and hand
+    ; the C dispatcher the user RSP so it can gather any stack arguments safely
+    ; (probing each, since a low-argument call may leave RSP near the top of the
+    ; stack where [RSP+0x28] is unmapped). Interrupts are masked (SFMASK clears
+    ; IF), so [gs:0] is a stable copy of the user RSP.
+    sub     rsp, 32               ; 4 * 8 bytes
     mov     [rsp+0x00], r10       ; arg1
     mov     [rsp+0x08], rdx       ; arg2
     mov     [rsp+0x10], r8        ; arg3
     mov     [rsp+0x18], r9        ; arg4
-    ; arguments 5..11 live above the stub's return address + home space.
-    mov     rcx, [r11+0x28]
-    mov     [rsp+0x20], rcx       ; arg5
-    mov     rcx, [r11+0x30]
-    mov     [rsp+0x28], rcx       ; arg6
-    mov     rcx, [r11+0x38]
-    mov     [rsp+0x30], rcx       ; arg7
-    mov     rcx, [r11+0x40]
-    mov     [rsp+0x38], rcx       ; arg8
-    mov     rcx, [r11+0x48]
-    mov     [rsp+0x40], rcx       ; arg9
-    mov     rcx, [r11+0x50]
-    mov     [rsp+0x48], rcx       ; arg10
-    mov     rcx, [r11+0x58]
-    mov     [rsp+0x50], rcx       ; arg11
 
-    mov     rdi, rax              ; num  -> arg1
-    mov     rsi, rsp              ; args -> arg2 (pointer to the array)
+    mov     rdi, rax              ; num       -> arg1
+    mov     rsi, rsp              ; reg args  -> arg2 (pointer)
+    mov     rdx, [gs:0]           ; user RSP  -> arg3
 
-    ; Stack is 16-aligned here: 5 pushes (40) + 88 = 128 from a 16-aligned top.
+    ; Realign to 16: 5 pushes (40) + 32 = 72, so drop 8 more.
+    sub     rsp, 8
     call    KiSystemServiceDispatch
-    add     rsp, 88               ; drop the argument array
+    add     rsp, 8
+    add     rsp, 32               ; drop the register-argument array
     ; return value already in RAX for the user
 
     pop     rsi                   ; restore caller's RSI

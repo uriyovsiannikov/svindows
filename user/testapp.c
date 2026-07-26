@@ -260,7 +260,7 @@ static DWORD WorkerThread(LPVOID param)
     return 0;
 }
 
-void Start(void)
+int main(void)
 {
     g_out = GetStdHandle(STD_OUTPUT_HANDLE);
     print("Win32 program: app.exe -> kernel32.dll -> ntdll.dll -> syscall\n");
@@ -292,6 +292,7 @@ void Start(void)
     /* Broader Win32 surface + the mini-CRT. */
     demo_win32_crt();
 
-    print("main: exiting via ExitProcess\n");
-    ExitProcess(0);
+    /* Return through the CRT startup, which calls ExitProcess for us. */
+    print("main: returning 0 (CRT startup will ExitProcess)\n");
+    return 0;
 }

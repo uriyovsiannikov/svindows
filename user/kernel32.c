@@ -293,7 +293,12 @@ __declspec(dllexport) FARPROC GetProcAddress(HANDLE module, const char *name)
 __declspec(dllexport) HANDLE GetStdHandle(DWORD which)
 {
     (void)which; /* every standard handle maps to the console for now */
-    return nt_open("\\Device\\Console");
+    /* Cached, like the real GetStdHandle: repeated calls (e.g. from every
+     * printf) return the same handle instead of reopening the console. */
+    static HANDLE g_std_console;
+    if (!g_std_console)
+        g_std_console = nt_open("\\Device\\Console");
+    return g_std_console;
 }
 
 __declspec(dllexport) BOOL WriteFile(HANDLE h, const void *buffer, DWORD len,

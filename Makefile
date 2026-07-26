@@ -51,6 +51,8 @@ ADVAPI32   := $(BUILD)/advapi32.dll
 ADVAPI32LIB := $(BUILD)/advapi32.lib
 MSVCRT     := $(BUILD)/msvcrt.dll
 MSVCRTLIB  := $(BUILD)/msvcrt.lib
+CRT0       := $(BUILD)/crt0.obj
+HELLO      := $(BUILD)/hello.exe
 EXTRA      := $(BUILD)/extra.dll
 DISK       := $(BUILD)/disk.img
 LLDLINK    := lld-link
@@ -121,23 +123,39 @@ $(EXTRA): user/extra.c
 	           /out:$(EXTRA) /implib:$(BUILD)/extra.lib $(BUILD)/extra.obj
 	@echo "  DLL   $(EXTRA)"
 
-# testapp.exe: a normal Win32 program (C), linked against kernel32 + advapi32
-# + msvcrt.
-$(TESTAPP): user/testapp.c $(KERNEL32) $(ADVAPI32) $(MSVCRT)
+# crt0.obj: the C runtime startup (mainCRTStartup). Linked into every program
+# so a standard `int main()` is entered without a custom /entry.
+$(CRT0): user/crt0.c
+	@mkdir -p $(BUILD)
+	$(CLANGWIN) -c user/crt0.c -o $(CRT0)
+
+# testapp.exe: a Win32 program (C) entered through the CRT startup (int main),
+# linked against kernel32 + advapi32 + msvcrt.
+$(TESTAPP): user/testapp.c $(CRT0) $(KERNEL32) $(ADVAPI32) $(MSVCRT)
 	@mkdir -p $(BUILD)
 	$(CLANGWIN) -c user/testapp.c -o $(BUILD)/testapp.obj
-	$(LLDLINK) /subsystem:console /entry:Start /nodefaultlib /machine:x64 \
-	           /out:$@ $(BUILD)/testapp.obj $(KERNEL32LIB) $(ADVAPI32LIB) \
-	           $(MSVCRTLIB)
+	$(LLDLINK) /subsystem:console /nodefaultlib /machine:x64 \
+	           /out:$@ $(BUILD)/testapp.obj $(CRT0) $(KERNEL32LIB) \
+	           $(ADVAPI32LIB) $(MSVCRTLIB)
+	@echo "  PE    $@"
+
+# hello.exe: a plain portable C program (int main, stdio/stdlib/string), built
+# the ordinary way -- no custom entry, no OS-specific code.
+$(HELLO): user/hello.c $(CRT0) $(KERNEL32) $(MSVCRT)
+	@mkdir -p $(BUILD)
+	$(CLANGWIN) -Iuser/include -c user/hello.c -o $(BUILD)/hello.obj
+	$(LLDLINK) /subsystem:console /nodefaultlib /machine:x64 \
+	           /out:$@ $(BUILD)/hello.obj $(CRT0) $(KERNEL32LIB) $(MSVCRTLIB)
 	@echo "  PE    $@"
 
 # FAT32 disk image holding the user-space executables, read by the kernel's
 # ATA + FAT drivers at runtime.
-$(DISK): $(TESTAPP) $(KERNEL32) $(NTDLL) $(ADVAPI32) $(MSVCRT) $(EXTRA) user/message.txt
+$(DISK): $(TESTAPP) $(HELLO) $(KERNEL32) $(NTDLL) $(ADVAPI32) $(MSVCRT) $(EXTRA) user/message.txt
 	@mkdir -p $(BUILD)
 	dd if=/dev/zero of=$(DISK) bs=1M count=64 status=none
 	mformat -i $(DISK) -F -v NTOSDISK ::
 	mcopy -i $(DISK) $(TESTAPP) ::TESTAPP.EXE
+	mcopy -i $(DISK) $(HELLO) ::HELLO.EXE
 	mcopy -i $(DISK) $(KERNEL32) ::KERNEL32.DLL
 	mcopy -i $(DISK) $(NTDLL) ::NTDLL.DLL
 	mcopy -i $(DISK) $(ADVAPI32) ::ADVAPI32.DLL

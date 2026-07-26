@@ -298,8 +298,9 @@ void KeSetTssRsp0(UINT64 rsp0);
 void KiEnterUserMode(UINT64 entry, UINT64 user_stack, UINT64 arg);
 
 /* The C half of the system-service dispatcher, called from KiSystemCallEntry
- * with the number and a pointer to the marshaled argument array. */
-UINT64 KiSystemServiceDispatch(UINT64 number, UINT64 *args);
+ * with the service number, the four register arguments, and the user RSP (from
+ * which any stack arguments are gathered, with probing). */
+UINT64 KiSystemServiceDispatch(UINT64 number, UINT64 *reg_args, UINT64 user_rsp);
 void   KiInitializeServiceTable(void);
 
 #endif /* _NTOS_KE_H_ */

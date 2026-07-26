@@ -253,11 +253,27 @@ void KiInitializeServiceTable(void)
     KiServiceTable[SN_NtLoadLibrary]           = NtLoadLibrary;
 }
 
-UINT64 KiSystemServiceDispatch(UINT64 number, UINT64 *args)
+UINT64 KiSystemServiceDispatch(UINT64 number, UINT64 *reg_args, UINT64 user_rsp)
 {
     if (number >= NTOS_MAX_SYSCALL || KiServiceTable[number] == NULL) {
         KeLog("[ke]   invalid system service 0x%lx\n", (unsigned long)number);
         return (UINT64)STATUS_NOT_IMPLEMENTED;
     }
+
+    /* Build the full argument array: the four register arguments, then up to
+     * seven stack arguments read from the user stack above the ntdll stub's
+     * return address (+0x28). Each stack slot is probed, so a call that passes
+     * fewer arguments (leaving RSP near the top of the stack) yields zeros
+     * instead of faulting the kernel on an unmapped read. */
+    UINT64 args[11];
+    args[0] = reg_args[0];
+    args[1] = reg_args[1];
+    args[2] = reg_args[2];
+    args[3] = reg_args[3];
+    for (int i = 0; i < 7; i++) {
+        UINT64 slot = user_rsp + 0x28 + (UINT64)i * 8;
+        args[4 + i] = MmProbeForRead(slot, 8) ? *(volatile UINT64 *)slot : 0;
+    }
+
     return KiServiceTable[number](args);
 }

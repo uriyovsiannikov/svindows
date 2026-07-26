@@ -129,6 +129,13 @@ The kernel currently:
   with its pages present, and object names are **captured**
   (`MmCaptureUnicodeName`) into kernel memory before use — so a bad pointer
   returns `STATUS_ACCESS_VIOLATION` instead of faulting the kernel.
+- **Runs a standard `int main()` program.** A CRT startup (`crt0.c`'s
+  `mainCRTStartup`, the linker's default console entry) parses `argc`/`argv` from
+  the command line, calls `main`, and exits with its return value — so a plain,
+  portable C program (`int main()`, `<stdio.h>`/`<stdlib.h>`/`<string.h>`, *no*
+  OS-specific code) compiles and runs on NTOS unchanged. `hello.exe` is exactly
+  that; `testapp.exe` now enters through the same startup too. This is the base
+  for eventually dropping in ready-made programs.
 
 See [`docs/ROADMAP.md`](docs/ROADMAP.md) for what comes next (physical/virtual
 memory manager, object manager, threads & scheduler, system-call boundary, and
@@ -173,7 +180,8 @@ kernel/
   ps/            Process manager (PEB/TEB, user process creation)
   io/            I/O manager (ATA PIO block driver, FAT32 filesystem)
   cm/            Configuration Manager (the registry)
-user/            User-space sources (ntdll, kernel32, advapi32, msvcrt, extra, testapp)
+user/            User-space sources (ntdll, kernel32, advapi32, msvcrt, crt0, extra, testapp, hello)
+  include/       minimal libc headers (stdio.h, stdlib.h, string.h) for portable programs
 docs/            architecture notes and roadmap
 scripts/         helper scripts
 ```

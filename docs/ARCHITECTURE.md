@@ -208,6 +208,20 @@ every clock tick, so `GetTickCount` just reads and scales the shared value. The
 command line lives in a `RTL_USER_PROCESS_PARAMETERS` block that `PEB->
 ProcessParameters` points at, where `GetCommandLine` finds it.
 
+## Running a standard program
+
+A program does not need NTOS-specific glue to run. The linker's default console
+entry is the CRT startup `mainCRTStartup` (`user/crt0.c`), which parses
+`argc`/`argv` from the command line, calls `int main(argc, argv, envp)`, and
+calls `ExitProcess` with its return value. So a plain, portable C program —
+`int main()`, `<stdio.h>`/`<stdlib.h>`/`<string.h>` (minimal headers under
+`user/include/` that declare the `msvcrt` exports), no OS-specific code —
+compiles the ordinary way and runs unchanged (`user/hello.c` → `hello.exe`).
+`testapp.exe` is entered the same way. This is the foundation for eventually
+loading ready-made Windows binaries: grow the reimplemented DLLs and the loader
+(TLS, load-config, SEH, ...) until real programs' imports and startup are all
+satisfied.
+
 ## Executive components
 
 The directory names match NT's internal prefixes, so a symbol like

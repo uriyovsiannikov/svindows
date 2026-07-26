@@ -20,6 +20,7 @@ __declspec(dllimport) BOOL   WriteFile(HANDLE, const void *, DWORD, DWORD *, voi
 __declspec(dllimport) HANDLE GetProcessHeap(void);
 __declspec(dllimport) void  *HeapAlloc(HANDLE, DWORD, SIZE_T);
 __declspec(dllimport) BOOL   HeapFree(HANDLE, DWORD, void *);
+__declspec(dllimport) void   ExitProcess(DWORD code);
 
 /* ------------------------------------------------------------------ */
 /* mem* / str*                                                         */
@@ -191,4 +192,22 @@ __declspec(dllexport) int puts(const char *s)
     write_stdout(s, n);
     write_stdout("\n", 1);
     return n + 1;
+}
+
+__declspec(dllexport) void exit(int code)
+{
+    ExitProcess((DWORD)code);
+}
+
+/* atoi: parse a leading optional-sign decimal integer. */
+__declspec(dllexport) int atoi(const char *s)
+{
+    int sign = 1, v = 0;
+    while (*s == ' ' || *s == '\t')
+        s++;
+    if (*s == '-') { sign = -1; s++; }
+    else if (*s == '+') { s++; }
+    while (*s >= '0' && *s <= '9')
+        v = v * 10 + (*s++ - '0');
+    return sign * v;
 }
