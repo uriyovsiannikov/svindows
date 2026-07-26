@@ -85,25 +85,25 @@ static void ObjectManagerDemo(void)
     KeLog("[test] closing the handle should delete the object:\n");
     ObCloseHandle(h1);
 
-    /* Namespace: \Device\TestEvent. */
-    struct _OBJECT_DIRECTORY *device_dir;
-    ObCreateDirectory(ObRootDirectory, "Device", &device_dir);
+    /* Namespace: \BaseNamedObjects\TestEvent (\Device is owned by Io). */
+    struct _OBJECT_DIRECTORY *bno_dir;
+    ObCreateDirectory(ObRootDirectory, "BaseNamedObjects", &bno_dir);
 
     POBJECT e2;
     ObCreateObject(event_type, 32, &e2);
-    ObInsertObjectByName(device_dir, "TestEvent", e2);
+    ObInsertObjectByName(bno_dir, "TestEvent", e2);
     ObDereferenceObject(e2); /* namespace now owns it */
-    KeLog("[test] inserted \\Device\\TestEvent\n");
+    KeLog("[test] inserted \\BaseNamedObjects\\TestEvent\n");
 
     POBJECT found;
-    NTSTATUS st = ObLookupObjectByName("\\Device\\TestEvent", &found);
-    KeLog("[test] lookup \\Device\\TestEvent -> status=0x%08x obj=%p\n",
+    NTSTATUS st = ObLookupObjectByName("\\BaseNamedObjects\\TestEvent", &found);
+    KeLog("[test] lookup \\BaseNamedObjects\\TestEvent -> status=0x%08x obj=%p\n",
           (unsigned)st, NT_SUCCESS(st) ? found : NULL);
     if (NT_SUCCESS(st))
         ObDereferenceObject(found);
 
-    st = ObLookupObjectByName("\\Device\\Missing", &found);
-    KeLog("[test] lookup \\Device\\Missing -> status=0x%08x (expected not found)\n",
+    st = ObLookupObjectByName("\\BaseNamedObjects\\Missing", &found);
+    KeLog("[test] lookup \\BaseNamedObjects\\Missing -> status=0x%08x (not found)\n",
           (unsigned)st);
 }
 

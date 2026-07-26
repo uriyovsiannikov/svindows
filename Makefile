@@ -81,12 +81,13 @@ $(TESTAPP): user/testapp.asm $(NTDLL)
 
 # FAT32 disk image holding the user-space executables, read by the kernel's
 # ATA + FAT drivers at runtime.
-$(DISK): $(TESTAPP) $(NTDLL)
+$(DISK): $(TESTAPP) $(NTDLL) user/message.txt
 	@mkdir -p $(BUILD)
 	dd if=/dev/zero of=$(DISK) bs=1M count=64 status=none
 	mformat -i $(DISK) -F -v NTOSDISK ::
 	mcopy -i $(DISK) $(TESTAPP) ::TESTAPP.EXE
 	mcopy -i $(DISK) $(NTDLL) ::NTDLL.DLL
+	mcopy -i $(DISK) user/message.txt ::MESSAGE.TXT
 	@echo "  DISK  $(DISK)"
 
 $(KERNEL): $(OBJ) kernel/arch/x86_64/linker.ld

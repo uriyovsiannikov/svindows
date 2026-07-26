@@ -79,9 +79,14 @@ the kernel allocates from.
 - [x] A read-only **FAT32** driver (BPB, FAT chain, root directory, 8.3 names).
 - [x] The loader reads `testapp.exe` and its `ntdll.dll` dependency **from a
       disk image** instead of embedded blobs.
+- [x] A **File object type** (Ob) and a console device at `\Device\Console`;
+      handle-based **`NtCreateFile` / `NtReadFile` / `NtWriteFile` / `NtClose`**
+      that open FAT files or the console and read/write through handles.
+- [x] The syscall entry preserves the caller's `RDI`/`RSI` (Windows
+      non-volatile), so the full Windows non-volatile set survives a syscall.
 - [ ] Device / driver objects and the IRP model (currently direct calls).
-- [ ] Write support; a real file API (`NtCreateFile` / `NtReadFile`) over the
-      object manager and handles.
+- [ ] Write support to disk; `OBJECT_ATTRIBUTES`/`UNICODE_STRING` names and
+      user-pointer probing/capture instead of trusting user pointers.
 
 ## Phase 6 — The NT user-mode boundary (in progress)
 

@@ -28,6 +28,12 @@ KiSystemCallEntry:
     push    rcx                   ; user RIP  (SYSCALL saved it in RCX)
     push    r11                   ; user RFLAGS (SYSCALL saved it in R11)
 
+    ; RDI and RSI are non-volatile in the Windows calling convention but scratch
+    ; in the kernel's SysV ABI, so preserve the caller's values. (RBX, RBP, and
+    ; R12-R15 are preserved automatically by the C dispatcher.)
+    push    rdi
+    push    rsi
+
     ; Marshal the Windows syscall ABI (num=RAX, a1=R10, a2=RDX, a3=R8, a4=R9)
     ; into the SysV argument registers for
     ; KiSystemServiceDispatch(num, a1, a2, a3, a4).
@@ -37,10 +43,12 @@ KiSystemCallEntry:
     mov     r8,  r9               ; a4  -> arg5
     ;   arg3 (RDX) already holds a2
 
-    ; RSP is 16-byte aligned here (kernel top, minus the two 8-byte pushes).
+    ; RSP is 16-byte aligned here (kernel top, minus four 8-byte pushes).
     call    KiSystemServiceDispatch
     ; return value already in RAX for the user
 
+    pop     rsi                   ; restore caller's RSI
+    pop     rdi                   ; restore caller's RDI
     pop     r11                   ; user RFLAGS
     pop     rcx                   ; user RIP
     mov     rsp, [gs:0]           ; restore user RSP

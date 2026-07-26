@@ -23,7 +23,11 @@ global %1
     ret
 %endmacro
 
-SYSCALL_STUB NtDisplayString,        0
-SYSCALL_STUB NtDisplayNumber,        1
-SYSCALL_STUB NtTerminateThread,      2
+SYSCALL_STUB NtDisplayString,         0
+SYSCALL_STUB NtDisplayNumber,         1
+SYSCALL_STUB NtTerminateThread,       2
 SYSCALL_STUB NtAllocateVirtualMemory, 3
+SYSCALL_STUB NtCreateFile,            4
+SYSCALL_STUB NtReadFile,              5
+SYSCALL_STUB NtWriteFile,             6
+SYSCALL_STUB NtClose,                 7

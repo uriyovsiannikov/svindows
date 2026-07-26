@@ -53,6 +53,10 @@ The kernel currently:
 - **Loads executables from a disk**: a polled **ATA PIO** driver and a read-only
   **FAT32** filesystem read `testapp.exe` and its `ntdll.dll` dependency off a
   disk image at runtime — no longer embedded in the kernel.
+- **Handle-based file I/O**: a `File` object type and a `\Device\Console` device
+  in the object namespace back `NtCreateFile` / `NtReadFile` / `NtWriteFile` /
+  `NtClose`. The test program opens the console and a file, reads the file, and
+  echoes it to the console entirely through NT handles.
 
 See [`docs/ROADMAP.md`](docs/ROADMAP.md) for what comes next (physical/virtual
 memory manager, object manager, threads & scheduler, system-call boundary, and

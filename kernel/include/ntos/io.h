@@ -33,7 +33,29 @@ NTSTATUS FatMount(void);
  */
 NTSTATUS FatLoadFile(const char *name, void **out_buffer, SIZE_T *out_size);
 
-/* Bring up the I/O subsystem (ATA + mount FAT). */
+/* Bring up the I/O subsystem (ATA + mount FAT + I/O objects). */
 NTSTATUS IoInitialize(void);
+
+/* ------------------------------------------------------------------ */
+/* File objects and the handle-based file services                    */
+/* ------------------------------------------------------------------ */
+
+/* Register the File object type and create \Device\Console. Requires Ob. */
+void IoInitializeObjects(void);
+
+/*
+ * Handle-based Nt* file services (simplified: names are ASCII, no
+ * OBJECT_ATTRIBUTES/UNICODE_STRING yet). Signatures match the syscall
+ * dispatcher: (a1, a2, a3, a4), result in the return value.
+ *
+ *   NtCreateFile(name)                 -> HANDLE (0 on failure)
+ *   NtReadFile(handle, buffer, length) -> bytes read
+ *   NtWriteFile(handle, buffer, length)-> bytes written
+ *   NtClose(handle)                    -> NTSTATUS
+ */
+UINT64 NtCreateFile(UINT64 name, UINT64 a2, UINT64 a3, UINT64 a4);
+UINT64 NtReadFile(UINT64 handle, UINT64 buffer, UINT64 length, UINT64 a4);
+UINT64 NtWriteFile(UINT64 handle, UINT64 buffer, UINT64 length, UINT64 a4);
+UINT64 NtClose(UINT64 handle, UINT64 a2, UINT64 a3, UINT64 a4);
 
 #endif /* _NTOS_IO_H_ */

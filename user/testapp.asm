@@ -1,43 +1,69 @@
 ; ============================================================================
-; user/testapp.asm - a native NTOS test program.
+; user/testapp.asm - a native NTOS test program exercising handle-based file I/O.
 ;
-; Demonstrates the ring-3 environment the way a real Windows program sees it:
-;   * imports Nt* from ntdll.dll (resolved through the IAT by the loader),
-;   * reads its TEB and PEB through the GS segment (gs:[0x30], gs:[0x60]),
-;   * allocates memory with NtAllocateVirtualMemory and uses it.
+; Opens the console and a file on the FAT disk through NtCreateFile, reads the
+; file with NtReadFile, echoes its contents to the console with NtWriteFile, and
+; closes both handles - the same object/handle model Windows uses.
 ;
-; Windows x64 calling convention: first integer argument in RCX; RAX returns.
+; Windows x64 calling convention: args in RCX, RDX, R8, R9; RAX returns; callers
+; reserve 32 bytes of shadow space. RBX/R12-R15 are non-volatile, so handles and
+; buffers kept there survive the syscalls.
 ; ============================================================================
 bits 64
 default rel
 
-extern NtDisplayString
-extern NtDisplayNumber
-extern NtTerminateThread
+extern NtCreateFile
+extern NtReadFile
+extern NtWriteFile
+extern NtClose
 extern NtAllocateVirtualMemory
+extern NtTerminateThread
 
 section .text
 global Start
 Start:
     and     rsp, -16
-    sub     rsp, 32               ; 32-byte shadow space, stays 16-aligned
+    sub     rsp, 32               ; shadow space, 16-aligned
 
-    lea     rcx, [message]        ; announce ourselves
-    call    NtDisplayString
+    ; console = NtCreateFile("\Device\Console")
+    lea     rcx, [console_name]
+    call    NtCreateFile
+    mov     rbx, rax              ; rbx = console handle
 
-    mov     rcx, [gs:0x30]        ; TEB self-pointer (NtTib.Self)
-    call    NtDisplayNumber       ; expect the TEB base
+    ; NtWriteFile(console, greeting, greeting_len)
+    mov     rcx, rbx
+    lea     rdx, [greeting]
+    mov     r8d, greeting_len
+    call    NtWriteFile
 
-    mov     rax, [gs:0x60]        ; TEB.ProcessEnvironmentBlock
-    mov     rcx, [rax + 0x10]     ; PEB.ImageBaseAddress
-    call    NtDisplayNumber       ; expect the executable's load base
-
-    mov     ecx, 0x1000           ; allocate one page
+    ; buffer = NtAllocateVirtualMemory(512)
+    mov     ecx, 512
     call    NtAllocateVirtualMemory
-    mov     edx, 0x0DEADBEE       ; write a marker...
-    mov     [rax], rdx
-    mov     rcx, [rax]            ; ...and read it back
-    call    NtDisplayNumber       ; expect 0x0DEADBEE
+    mov     r13, rax              ; r13 = read buffer
+
+    ; file = NtCreateFile("message.txt")
+    lea     rcx, [file_name]
+    call    NtCreateFile
+    mov     r12, rax              ; r12 = file handle
+
+    ; bytes = NtReadFile(file, buffer, 512)
+    mov     rcx, r12
+    mov     rdx, r13
+    mov     r8d, 512
+    call    NtReadFile
+    mov     r14, rax              ; r14 = bytes read
+
+    ; NtWriteFile(console, buffer, bytes) - echo the file to the console
+    mov     rcx, rbx
+    mov     rdx, r13
+    mov     r8, r14
+    call    NtWriteFile
+
+    ; close both handles
+    mov     rcx, r12
+    call    NtClose
+    mov     rcx, rbx
+    call    NtClose
 
     call    NtTerminateThread     ; does not return
 
@@ -45,5 +71,10 @@ Start:
     jmp     .hang
 
 section .rdata
-message:
-    db "Native PE: reading TEB/PEB via GS and allocating memory.", 0
+console_name:
+    db "\Device\Console", 0
+file_name:
+    db "message.txt", 0
+greeting:
+    db "testapp.exe: reading a file through NT handles ->", 10
+greeting_len equ $ - greeting

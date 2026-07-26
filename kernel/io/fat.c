@@ -219,6 +219,9 @@ NTSTATUS FatLoadFile(const char *name, void **out_buffer, SIZE_T *out_size)
 
 NTSTATUS IoInitialize(void)
 {
+    /* File/console objects need Ob but not the disk, so set them up regardless. */
+    IoInitializeObjects();
+
     if (!AtaInitialize())
         return STATUS_NO_SUCH_DEVICE;
     return FatMount();

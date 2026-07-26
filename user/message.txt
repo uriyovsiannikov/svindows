@@ -1,0 +1,3 @@
+Hello from a file on the FAT32 disk!
+This text was read by testapp.exe through NtCreateFile + NtReadFile,
+and written to the console through NtWriteFile -- real handle-based I/O.
