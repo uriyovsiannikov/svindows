@@ -39,7 +39,7 @@ typedef struct _TEB {
     ULONG     CountOfOwnedCriticalSections;/* 0x6C */
 } TEB, *PTEB;
 
-/* Loader data (module list), referenced by PEB.Ldr. Stubbed for now. */
+/* Loader data (module list), referenced by PEB.Ldr. */
 typedef struct _PEB_LDR_DATA {
     ULONG      Length;
     UINT8      Initialized;
@@ -48,6 +48,23 @@ typedef struct _PEB_LDR_DATA {
     LIST_ENTRY InMemoryOrderModuleList;
     LIST_ENTRY InInitializationOrderModuleList;
 } PEB_LDR_DATA, *PPEB_LDR_DATA;
+
+/*
+ * One loaded module. Windows' loader threads these onto the three PEB_LDR_DATA
+ * lists; kernel32's GetModuleHandle/GetProcAddress walk the load-order list.
+ * Field offsets match the Windows x64 layout so native code can rely on them.
+ */
+typedef struct _LDR_DATA_TABLE_ENTRY {
+    LIST_ENTRY     InLoadOrderLinks;           /* 0x00 */
+    LIST_ENTRY     InMemoryOrderLinks;         /* 0x10 */
+    LIST_ENTRY     InInitializationOrderLinks; /* 0x20 */
+    PVOID          DllBase;                    /* 0x30 */
+    PVOID          EntryPoint;                 /* 0x38 */
+    ULONG          SizeOfImage;                /* 0x40 */
+    UNICODE_STRING FullDllName;                /* 0x48 */
+    UNICODE_STRING BaseDllName;                /* 0x58 */
+    ULONG          Flags;                      /* 0x68 */
+} LDR_DATA_TABLE_ENTRY, *PLDR_DATA_TABLE_ENTRY;
 
 /* Process Environment Block (leading fields; reached via TEB[0x60]). */
 typedef struct PACKED _PEB {

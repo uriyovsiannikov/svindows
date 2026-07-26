@@ -18,6 +18,7 @@
 #include <ntos/io.h>
 #include <ntos/ex.h>
 #include <nt/pe.h>
+#include <nt/peb.h>
 
 /* Cache of already-loaded modules (name -> load base). Satisfies repeat imports
  * and breaks import cycles. */
@@ -323,6 +324,72 @@ static UINT64 LdrpLoadModule(const char *name)
 }
 
 /* ------------------------------------------------------------------ */
+/* Process module list (PEB->Ldr)                                     */
+/* ------------------------------------------------------------------ */
+
+void LdrBuildProcessModuleList(struct _PEB *peb_opaque, UINT64 ldr_va,
+                               UINT64 ldr_size)
+{
+    PPEB peb = (PPEB)peb_opaque;
+
+    /* Bump-allocate the loader structures out of the user Ldr region. */
+    UINT8 *cursor = (UINT8 *)ldr_va;
+    UINT8 *end = cursor + ldr_size;
+
+    PPEB_LDR_DATA ldr = (PPEB_LDR_DATA)cursor;
+    cursor += sizeof(PEB_LDR_DATA);
+    memset(ldr, 0, sizeof(*ldr));
+    ldr->Length = sizeof(PEB_LDR_DATA);
+    ldr->Initialized = 1;
+    InitializeListHead(&ldr->InLoadOrderModuleList);
+    InitializeListHead(&ldr->InMemoryOrderModuleList);
+    InitializeListHead(&ldr->InInitializationOrderModuleList);
+
+    int count = 0;
+    for (int i = 0; i < MAX_LOADED_MODULES; i++) {
+        if (!g_loaded[i].Valid)
+            continue;
+        /* Need room for the entry plus a wide name buffer. */
+        if (cursor + sizeof(LDR_DATA_TABLE_ENTRY) + 128 > end)
+            break;
+
+        PLDR_DATA_TABLE_ENTRY e = (PLDR_DATA_TABLE_ENTRY)cursor;
+        cursor += sizeof(LDR_DATA_TABLE_ENTRY);
+        memset(e, 0, sizeof(*e));
+
+        UINT64 mbase = g_loaded[i].Base;
+        PIMAGE_NT_HEADERS64 nt = nt_headers(mbase);
+        e->DllBase = (PVOID)mbase;
+        e->EntryPoint = nt ? (PVOID)(mbase + nt->OptionalHeader.AddressOfEntryPoint)
+                           : NULL;
+        e->SizeOfImage = nt ? nt->OptionalHeader.SizeOfImage : 0;
+
+        /* Widen the ASCII module name into a UTF-16 buffer for BaseDllName. */
+        UINT16 *wname = (UINT16 *)cursor;
+        int n = 0;
+        for (; g_loaded[i].Name[n] && n < 63; n++)
+            wname[n] = (UINT16)(UCHAR)g_loaded[i].Name[n];
+        wname[n] = 0;
+        cursor += (n + 1) * sizeof(UINT16);
+        cursor = (UINT8 *)(((UINT64)cursor + 7) & ~7ULL); /* realign */
+
+        e->BaseDllName.Length = (USHORT)(n * 2);
+        e->BaseDllName.MaximumLength = (USHORT)((n + 1) * 2);
+        e->BaseDllName.Buffer = wname;
+        e->FullDllName = e->BaseDllName;
+
+        InsertTailList(&ldr->InLoadOrderModuleList, &e->InLoadOrderLinks);
+        InsertTailList(&ldr->InMemoryOrderModuleList, &e->InMemoryOrderLinks);
+        InsertTailList(&ldr->InInitializationOrderModuleList,
+                       &e->InInitializationOrderLinks);
+        count++;
+    }
+
+    peb->Ldr = ldr;
+    KeLog("[ldr]  PEB->Ldr ready: %d modules linked @ %p\n", count, (void *)ldr);
+}
+
+/* ------------------------------------------------------------------ */
 /* Public entry point                                                 */
 /* ------------------------------------------------------------------ */
 
@@ -345,6 +412,10 @@ NTSTATUS LdrLoadExecutable(const char *filename, UINT64 *entry_out,
     KeLog("[ldr]  exe base=%p entry_rva=0x%x size=0x%x sections=%u\n",
           (void *)base, nt->OptionalHeader.AddressOfEntryPoint,
           nt->OptionalHeader.SizeOfImage, nt->FileHeader.NumberOfSections);
+
+    /* Register the exe itself as the first module (load-order head), before its
+     * dependencies get pulled in by import resolution. */
+    remember_module(filename, base);
 
     status = LdrResolveImports(base);
     if (!NT_SUCCESS(status))

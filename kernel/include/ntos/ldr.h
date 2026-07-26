@@ -28,4 +28,13 @@ NTSTATUS LdrLoadExecutable(const char *filename, UINT64 *entry_out,
 /* Resolve an exported routine's address in a loaded module. */
 UINT64 LdrGetProcAddress(UINT64 module_base, const char *name);
 
+/*
+ * Build the process's loader module list (PEB_LDR_DATA + one
+ * LDR_DATA_TABLE_ENTRY per loaded module) in a user-readable region and point
+ * @peb->Ldr at it. @ldr_va / @ldr_size describe that region (already mapped
+ * user-writable). Lets ring-3 kernel32 walk loaded modules the Windows way.
+ */
+struct _PEB;
+void LdrBuildProcessModuleList(struct _PEB *peb, UINT64 ldr_va, UINT64 ldr_size);
+
 #endif /* _NTOS_LDR_H_ */

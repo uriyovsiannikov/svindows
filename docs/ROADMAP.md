@@ -108,17 +108,25 @@ the kernel allocates from.
       demand, resolves each name against its export directory, and patches the
       executable's IAT — the authentic Windows dynamic-linking flow. The syscall
       ABI now matches Windows (args in `R10`/`RDX`/`R8`/`R9`).
-- [ ] Load PE images from a filesystem (needs Phase 5) rather than an embedded
-      blob; a proper module list (`PEB_LDR_DATA`).
+- [x] Load PE images from a filesystem (needs Phase 5) rather than an embedded
+      blob; a proper module list (`PEB_LDR_DATA` with a `LDR_DATA_TABLE_ENTRY`
+      per module at the Windows x64 layout, built by `LdrBuildProcessModuleList`).
 - [ ] Forwarded exports, bound imports, and TLS callbacks.
 - [x] A **Win32 subsystem library `kernel32.dll`** (built from C, over ntdll)
       with `GetStdHandle` / `WriteFile` / `ReadFile` / `CreateFileA` /
       `CloseHandle` / `CreateThread` / `WaitForSingleObject` / `ExitProcess`,
       and a **normal Win32 program** that links against it — the loader resolves
       the full `app.exe -> kernel32.dll -> ntdll.dll` import chain from disk.
-- [ ] Grow the Win32 surface (`user32`/`gdi32`, a real CRT, `HeapAlloc`, ...)
-      and match the real Windows `Nt*` numbers/signatures so that *unmodified*
-      Windows binaries can run — the ReactOS/Wine-scale endgame.
+- [x] The **dynamic runtime**: `GetModuleHandleA` (walks `PEB->Ldr`),
+      `GetProcAddress` (parses the PE export directory), and a process heap
+      (`GetProcessHeap` / `HeapCreate` / `HeapAlloc` / `HeapFree`) over
+      `NtAllocateVirtualMemory`. SSE enabled at boot for compiler-emitted XMM.
+- [ ] `LoadLibraryA` (load a DLL at runtime and link it into `PEB->Ldr`), and
+      preserve XMM/FPU state across context switches (FXSAVE/FXRSTOR).
+- [ ] A registry (hive + `NtCreateKey`/`NtQueryValueKey`/...).
+- [ ] Grow the Win32 surface (`user32`/`gdi32`, a real CRT, ...) and match the
+      real Windows `Nt*` numbers/signatures so that *unmodified* Windows
+      binaries can run — the ReactOS/Wine-scale endgame.
 
 ## Phase 7 — Graphics and the road to a desktop (in progress)
 

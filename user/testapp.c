@@ -7,13 +7,18 @@
  * Windows target and linked against kernel32's import library.
  */
 
-typedef void         *HANDLE;
-typedef void         *LPVOID;
-typedef unsigned long DWORD;
-typedef int           BOOL;
+typedef void              *HANDLE;
+typedef void              *LPVOID;
+typedef unsigned char      BYTE;
+typedef unsigned long      DWORD;
+typedef unsigned long long ULONGLONG;
+typedef unsigned long long SIZE_T;
+typedef int                BOOL;
+typedef void             (*FARPROC)(void);
 
 #define STD_OUTPUT_HANDLE ((DWORD)-11)
 #define INFINITE          0xFFFFFFFF
+#define HEAP_ZERO_MEMORY  0x00000008
 
 __declspec(dllimport) HANDLE GetStdHandle(DWORD which);
 __declspec(dllimport) BOOL   WriteFile(HANDLE, const void *, DWORD, DWORD *, LPVOID);
@@ -25,6 +30,13 @@ __declspec(dllimport) HANDLE CreateThread(LPVOID, unsigned long long, LPVOID,
 __declspec(dllimport) DWORD  WaitForSingleObject(HANDLE, DWORD);
 __declspec(dllimport) BOOL   CloseHandle(HANDLE);
 __declspec(dllimport) void   ExitProcess(DWORD);
+
+/* The dynamic runtime we're exercising here. */
+__declspec(dllimport) HANDLE  GetModuleHandleA(const char *name);
+__declspec(dllimport) FARPROC GetProcAddress(HANDLE module, const char *name);
+__declspec(dllimport) HANDLE  GetProcessHeap(void);
+__declspec(dllimport) LPVOID  HeapAlloc(HANDLE heap, DWORD flags, SIZE_T bytes);
+__declspec(dllimport) BOOL    HeapFree(HANDLE heap, DWORD flags, LPVOID ptr);
 
 static HANDLE g_out;
 
@@ -40,6 +52,60 @@ static void print(const char *s)
 {
     DWORD written;
     WriteFile(g_out, s, str_len(s), &written, 0);
+}
+
+static void print_hex(ULONGLONG v)
+{
+    char t[19];
+    t[0] = '0'; t[1] = 'x';
+    for (int i = 0; i < 16; i++) {
+        int nib = (int)((v >> ((15 - i) * 4)) & 0xF);
+        t[2 + i] = (char)(nib < 10 ? '0' + nib : 'a' + nib - 10);
+    }
+    t[18] = 0;
+    print(t);
+}
+
+static void print_ptr(const char *label, ULONGLONG v)
+{
+    print(label);
+    print_hex(v);
+    print("\n");
+}
+
+/* Type of the GetProcessHeap we resolve dynamically. */
+typedef HANDLE (*GetProcessHeap_t)(void);
+
+/* Show the dynamic runtime working: look a module up by name, resolve a
+ * function from it by name, call it, then use the process heap. */
+static void demo_dynamic_runtime(void)
+{
+    print("\n-- dynamic runtime (GetModuleHandle / GetProcAddress / heap) --\n");
+
+    HANDLE k32 = GetModuleHandleA("kernel32.dll");
+    print_ptr("  GetModuleHandleA(\"kernel32.dll\") = ", (ULONGLONG)k32);
+
+    /* Resolve GetProcessHeap by name and call the resolved pointer. */
+    GetProcessHeap_t pGetProcessHeap =
+        (GetProcessHeap_t)GetProcAddress(k32, "GetProcessHeap");
+    print_ptr("  GetProcAddress(k32, \"GetProcessHeap\") = ",
+              (ULONGLONG)(void *)pGetProcessHeap);
+
+    HANDLE heap = pGetProcessHeap();
+    print_ptr("  heap = ", (ULONGLONG)heap);
+
+    char *buf = (char *)HeapAlloc(heap, HEAP_ZERO_MEMORY, 64);
+    print_ptr("  HeapAlloc(heap, 64) = ", (ULONGLONG)buf);
+
+    const char *msg = "  heap buffer holds: dynamically allocated memory works!\n";
+    DWORD i = 0;
+    for (; msg[i]; i++)
+        buf[i] = msg[i];
+    buf[i] = 0;
+    print(buf);
+
+    HeapFree(heap, 0, buf);
+    print("  HeapFree ok\n");
 }
 
 static DWORD WorkerThread(LPVOID param)
@@ -67,7 +133,11 @@ void Start(void)
     HANDLE thread = CreateThread(0, 0, (LPVOID)WorkerThread, 0, 0, 0);
     WaitForSingleObject(thread, INFINITE);
     CloseHandle(thread);
-    print("main: worker finished; exiting via ExitProcess\n");
+    print("main: worker finished\n");
 
+    /* Exercise dynamic module/symbol resolution and the heap. */
+    demo_dynamic_runtime();
+
+    print("main: exiting via ExitProcess\n");
     ExitProcess(0);
 }

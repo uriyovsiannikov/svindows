@@ -94,6 +94,19 @@ normal Win32 program links only against kernel32 and never issues a raw syscall.
 compiled with `clang --target=x86_64-pc-windows-msvc` and linked with
 `lld-link` — ordinary PE files.
 
+After loading, the kernel builds the process's **`PEB->Ldr` module list** —
+a `PEB_LDR_DATA` with a `LDR_DATA_TABLE_ENTRY` (DllBase, EntryPoint,
+SizeOfImage, a wide BaseDllName) per loaded module, threaded onto the
+load/memory/init-order lists at the Windows x64 offsets — in a user-readable
+region `PEB->Ldr` points at (`LdrBuildProcessModuleList`). That is what lets the
+**dynamic runtime** work in ring 3 without the kernel's help: kernel32's
+`GetModuleHandleA` walks the load-order list, `GetProcAddress` parses the target
+module's PE export directory, and the process heap (`GetProcessHeap` /
+`HeapAlloc` / `HeapFree`, a coalescing free list) runs over
+`NtAllocateVirtualMemory`. SSE is enabled at boot (`CR0.MP`/`CR4.OSFXSR`), since
+compiler-emitted XMM use — pervasive in real Windows binaries — would otherwise
+fault; XMM state is not yet preserved across context switches (see the roadmap).
+
 ## Graphics
 
 GRUB is asked for a 32-bpp linear framebuffer through a Multiboot2 framebuffer

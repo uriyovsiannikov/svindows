@@ -129,6 +129,16 @@ long_mode_start:
     mov     fs, ax
     mov     gs, ax
 
+    ; Enable SSE. SSE2 is guaranteed on x86-64, and user code (and any real
+    ; Windows binary) uses XMM registers; without this those instructions #UD.
+    mov     rax, cr0
+    and     ax, 0xFFFB                ; clear CR0.EM (no x87 emulation)
+    or      ax, 0x0002                ; set   CR0.MP (monitor coprocessor)
+    mov     cr0, rax
+    mov     rax, cr4
+    or      rax, 3 << 9               ; set CR4.OSFXSR | CR4.OSXMMEXCPT
+    mov     cr4, rax
+
     ; Absolute (64-bit) jump into the higher half.
     mov     rax, qword higher_half_start
     jmp     rax

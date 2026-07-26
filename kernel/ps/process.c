@@ -9,6 +9,7 @@
 #include <ntos/mm.h>
 #include <ntos/ke.h>
 #include <ntos/rtl.h>
+#include <ntos/ldr.h>
 #include <nt/peb.h>
 
 /* Fixed user addresses for the single process we currently support (shared with
@@ -32,6 +33,11 @@ PKTHREAD PsCreateUserProcess(const char *name, UINT64 entry, UINT64 image_base,
     PPEB peb = map_user_rw(USER_PEB_VA);
     memset(peb, 0, sizeof(*peb));
     peb->ImageBaseAddress = (PVOID)image_base;
+
+    /* Loader module list, so ring-3 code can enumerate loaded modules. */
+    for (UINT64 off = 0; off < PROCESS_LDR_SIZE; off += PAGE_SIZE)
+        map_user_rw(PROCESS_LDR_VA + off);
+    LdrBuildProcessModuleList(peb, PROCESS_LDR_VA, PROCESS_LDR_SIZE);
 
     /* TEB: the per-thread block GS resolves to in ring 3. */
     PTEB teb = map_user_rw(USER_TEB_VA);

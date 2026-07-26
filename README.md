@@ -79,6 +79,16 @@ The kernel currently:
   thread echoes typed characters and draws an arrow **mouse cursor** that
   follows the mouse, saving and restoring the pixels underneath it (and hiding
   itself while the console draws) so the desktop stays intact.
+- **Runs a Windows dynamic runtime.** The kernel loader builds a real
+  **`PEB->Ldr` module list** (`LDR_DATA_TABLE_ENTRY` per loaded module, with the
+  Windows x64 field layout), and kernel32 implements **`GetModuleHandleA`**
+  (walking that list), **`GetProcAddress`** (parsing a module's PE export
+  directory), and a **process heap** (`GetProcessHeap` / `HeapCreate` /
+  `HeapAlloc` / `HeapFree`, a coalescing free list over
+  `NtAllocateVirtualMemory`). The test program looks a module up by name,
+  resolves a function from it by name, calls the resolved pointer, and allocates
+  from the heap — the runtime backbone almost every Windows binary relies on.
+  **SSE** is enabled at boot (mandatory on x86-64 and for real Windows code).
 
 See [`docs/ROADMAP.md`](docs/ROADMAP.md) for what comes next (physical/virtual
 memory manager, object manager, threads & scheduler, system-call boundary, and
