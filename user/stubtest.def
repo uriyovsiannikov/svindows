@@ -1,0 +1,6 @@
+; An import library that promises a kernel32 export our kernel32.dll does not
+; actually provide. Linking a program against this lets us verify the loader
+; stubs the unresolved import (logs it, returns 0) instead of failing the load.
+LIBRARY kernel32.dll
+EXPORTS
+    NonexistentKernel32Function

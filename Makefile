@@ -129,14 +129,22 @@ $(CRT0): user/crt0.c
 	@mkdir -p $(BUILD)
 	$(CLANGWIN) -c user/crt0.c -o $(CRT0)
 
+# stubtest.lib: an import library (built by llvm-dlltool from a .def) that
+# promises a kernel32 export the real kernel32.dll does not provide, so testapp
+# can exercise the loader's unimplemented-import stubbing.
+STUBTESTLIB := $(BUILD)/stubtest.lib
+$(STUBTESTLIB): user/stubtest.def
+	@mkdir -p $(BUILD)
+	llvm-dlltool -m i386:x86-64 -d user/stubtest.def -l $(STUBTESTLIB) -D kernel32.dll
+
 # testapp.exe: a Win32 program (C) entered through the CRT startup (int main),
-# linked against kernel32 + advapi32 + msvcrt.
-$(TESTAPP): user/testapp.c $(CRT0) $(KERNEL32) $(ADVAPI32) $(MSVCRT)
+# linked against kernel32 + advapi32 + msvcrt (+ the stubtest import lib).
+$(TESTAPP): user/testapp.c $(CRT0) $(KERNEL32) $(ADVAPI32) $(MSVCRT) $(STUBTESTLIB)
 	@mkdir -p $(BUILD)
 	$(CLANGWIN) -c user/testapp.c -o $(BUILD)/testapp.obj
 	$(LLDLINK) /subsystem:console /nodefaultlib /machine:x64 \
 	           /out:$@ $(BUILD)/testapp.obj $(CRT0) $(KERNEL32LIB) \
-	           $(ADVAPI32LIB) $(MSVCRTLIB)
+	           $(ADVAPI32LIB) $(MSVCRTLIB) $(STUBTESTLIB)
 	@echo "  PE    $@"
 
 # hello.exe: a plain portable C program (int main, stdio/stdlib/string), built

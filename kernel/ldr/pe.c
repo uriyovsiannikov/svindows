@@ -225,6 +225,31 @@ static UINT64 LdrpProcByOrdinal(UINT64 base, UINT16 ordinal)
 /* Forward declaration: importing an image may pull in dependency modules. */
 static UINT64 LdrpLoadModule(const char *name);
 
+/* Fixed user VA for the shared "unimplemented import" stub. */
+#define LDR_IMPORT_STUB_VA 0x0000000000069000ULL
+
+/*
+ * A ring-3 routine (`xor eax, eax; ret`) that unresolved imports are pointed at,
+ * so an image loads even when it imports functions we don't provide yet: the
+ * call just returns 0 instead of failing the whole load. Created once, on demand.
+ */
+static UINT64 LdrpImportStub(void)
+{
+    static UINT64 stub;
+    if (!stub) {
+        UINT64 pa = MmAllocatePage();
+        if (pa == MM_INVALID_PHYS)
+            return 0;
+        MmMapPage(LDR_IMPORT_STUB_VA, pa, PTE_USER | PTE_WRITE);
+        UINT8 *code = (UINT8 *)LDR_IMPORT_STUB_VA;
+        code[0] = 0x31; /* xor eax, eax */
+        code[1] = 0xC0;
+        code[2] = 0xC3; /* ret          */
+        stub = LDR_IMPORT_STUB_VA;
+    }
+    return stub;
+}
+
 static NTSTATUS LdrResolveImports(UINT64 base)
 {
     PIMAGE_NT_HEADERS64 nt = nt_headers(base);
@@ -249,24 +274,37 @@ static NTSTATUS LdrResolveImports(UINT64 base)
         UINT64 *names = (UINT64 *)(base + int_rva);
         UINT64 *iat = (UINT64 *)(base + desc->FirstThunk);
 
+        UINT32 stubbed = 0;
         for (UINT32 i = 0; names[i]; i++) {
             UINT64 thunk = names[i];
             UINT64 addr;
             if (thunk & IMAGE_ORDINAL_FLAG64) {
-                addr = LdrpProcByOrdinal(dll_base, (UINT16)(thunk & 0xFFFF));
+                UINT16 ord = (UINT16)(thunk & 0xFFFF);
+                addr = LdrpProcByOrdinal(dll_base, ord);
+                if (!addr)
+                    KeLog("[ldr]  STUB unimplemented import %s!#%u\n", dll, ord);
             } else {
                 IMAGE_IMPORT_BY_NAME *ibn =
                     (IMAGE_IMPORT_BY_NAME *)(base + (thunk & 0x7FFFFFFF));
                 addr = LdrGetProcAddress(dll_base, ibn->Name);
                 if (!addr)
-                    KeLog("[ldr]  import: '%s' not exported by %s\n",
-                          ibn->Name, dll);
+                    KeLog("[ldr]  STUB unimplemented import %s!%s\n",
+                          dll, ibn->Name);
             }
-            if (!addr)
-                return STATUS_INVALID_IMAGE_FORMAT;
+            /* Unresolved imports get a return-0 stub so the image still loads;
+             * the log above is the to-do list of what a binary actually needs. */
+            if (!addr) {
+                addr = LdrpImportStub();
+                stubbed++;
+            }
             iat[i] = addr;
         }
-        KeLog("[ldr]  linked imports from %s (base %p)\n", dll, (void *)dll_base);
+        if (stubbed)
+            KeLog("[ldr]  linked imports from %s (base %p, %u stubbed)\n",
+                  dll, (void *)dll_base, stubbed);
+        else
+            KeLog("[ldr]  linked imports from %s (base %p)\n", dll,
+                  (void *)dll_base);
     }
     return STATUS_SUCCESS;
 }

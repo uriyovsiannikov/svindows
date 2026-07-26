@@ -143,6 +143,12 @@ The kernel currently:
   re-applies page protection), `QueryPerformanceCounter` /
   `QueryPerformanceFrequency` (off the shared-data clock), the `Interlocked*`
   family, and recursive **critical sections**.
+- **Loads past missing imports.** The loader no longer fails when an image
+  imports a function we don't provide yet: it **logs the missing import and
+  points the IAT at a return-0 stub**, so the image still loads and runs. That
+  log is the exact to-do list a real binary needs — the same load-and-report
+  loop Wine/ReactOS use to bootstrap toward running unmodified binaries. (Tested
+  with an import lib that promises a `kernel32` export the DLL doesn't have.)
 
 See [`docs/ROADMAP.md`](docs/ROADMAP.md) for what comes next (physical/virtual
 memory manager, object manager, threads & scheduler, system-call boundary, and

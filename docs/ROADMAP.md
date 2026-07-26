@@ -157,9 +157,13 @@ the kernel allocates from.
       `VirtualAlloc`/`VirtualFree`/`VirtualProtect` (over a new
       `NtProtectVirtualMemory`), `QueryPerformanceCounter`/`QueryPerformanceFrequency`,
       the `Interlocked*` family, and recursive critical sections.
+- [x] Loader tolerance for real binaries: an image that imports functions we
+      don't provide yet **loads anyway** — the loader logs each missing import
+      and points the IAT at a return-0 stub (the load-and-report loop that
+      bootstraps toward unmodified binaries).
 - [ ] Keep growing toward *unmodified, ready-made* Windows binaries: TLS
-      (`TlsAlloc`/`TlsGetValue`, TEB slots), a fuller CRT/`msvcrt`, TLS-directory +
-      load-config (security cookie) handling in the loader, kernel SEH
+      (`TlsAlloc`/`TlsGetValue`, TEB slots) + the PE TLS directory and callbacks,
+      a fuller CRT/`msvcrt`, load-config (security cookie) handling, kernel SEH
       (`.pdata`/`RUNTIME_FUNCTION`) so exceptions and fault-safe probes work, and
       eventually `user32`/`gdi32` for GUI programs — the ReactOS/Wine-scale
       endgame that leads to a real desktop shell.

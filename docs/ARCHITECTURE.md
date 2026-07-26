@@ -108,7 +108,12 @@ its preferred base, then **resolves imports** — for each imported DLL it loads
 the module (from the mounted filesystem, on demand), looks each imported routine
 up in that module's export directory, and patches the executable's Import
 Address Table. Resolution recurses, so a full `app.exe -> kernel32.dll ->
-ntdll.dll` chain links up automatically.
+ntdll.dll` chain links up automatically. An import the target module doesn't
+export no longer fails the load: the loader logs it (`STUB unimplemented import
+dll!name`) and points that IAT slot at a shared ring-3 return-0 stub, so the
+image still loads and runs. That log is the precise list of what an unmodified
+binary would need next — the load-and-report loop that bootstraps toward running
+real binaries.
 
 At the bottom, `ntdll.dll` is the native library: each `Nt*` export is a stub
 (`mov r10, rcx; mov eax, <n>; syscall`) that crosses into the kernel.

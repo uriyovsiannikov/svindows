@@ -91,6 +91,10 @@ __declspec(dllimport) void   EnterCriticalSection(void *);
 __declspec(dllimport) void   LeaveCriticalSection(void *);
 __declspec(dllimport) void   DeleteCriticalSection(void *);
 
+/* Imported from kernel32 via a mismatched import lib -- the real kernel32.dll
+ * doesn't export this, so the loader stubs it (proves load-past-missing-import). */
+__declspec(dllimport) int    NonexistentKernel32Function(void);
+
 static HANDLE g_out;
 
 static DWORD str_len(const char *s)
@@ -328,6 +332,13 @@ static void demo_syswin(void)
     DeleteCriticalSection(&cs);
     wsprintfA(line, "  InterlockedIncrement x5 under a critical section = %d\n",
               (int)counter);
+    print(line);
+
+    /* Call an import the real kernel32 doesn't export: the loader stubbed it,
+     * so this returns 0 rather than having failed the whole load. */
+    int stubbed = NonexistentKernel32Function();
+    wsprintfA(line, "  NonexistentKernel32Function() -> %d (loader stub)\n",
+              stubbed);
     print(line);
 }
 
