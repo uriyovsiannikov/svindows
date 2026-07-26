@@ -80,6 +80,27 @@ extern NTSTATUS  NtWaitForSingleObject(HANDLE Handle, int Alertable,
 extern void      NtTerminateThread(void);
 extern HANDLE    NtLoadLibrary(const char *name);
 extern NTSTATUS  NtDelayExecution(int Alertable, long long *Interval);
+extern NTSTATUS  NtProtectVirtualMemory(HANDLE Process, void **BaseAddress,
+                                        ULONGLONG *RegionSize, DWORD NewProtect,
+                                        DWORD *OldProtect);
+
+/* GS-relative TEB access (the TEB is at GS in ring 3). */
+static DWORD read_gs_dword(ULONGLONG off)
+{
+    DWORD v;
+    __asm__ volatile("movl %%gs:(%1), %0" : "=r"(v) : "r"(off));
+    return v;
+}
+static void write_gs_dword(ULONGLONG off, DWORD val)
+{
+    __asm__ volatile("movl %0, %%gs:(%1)" : : "r"(val), "r"(off));
+}
+static ULONGLONG read_gs_qword(ULONGLONG off)
+{
+    ULONGLONG v;
+    __asm__ volatile("movq %%gs:(%1), %0" : "=r"(v) : "r"(off));
+    return v;
+}
 
 void *memset(void *dst, int v, SIZE_T n); /* defined below */
 
@@ -615,7 +636,7 @@ static int fmt_uint(char *buf, ULONGLONG v, int base, int is_signed,
     return len;
 }
 
-/* A small wsprintfA: supports %d %u %x %s %c %% (no width/precision). */
+/* A small wsprintfA: supports %d %u %x %p %s %c %% (no width/precision). */
 __declspec(dllexport) int wsprintfA(char *out, const char *fmt, ...)
 {
     __builtin_va_list ap;
@@ -631,6 +652,10 @@ __declspec(dllexport) int wsprintfA(char *out, const char *fmt, ...)
         case 'd': o += fmt_uint(out + o, 0, 10, 1, __builtin_va_arg(ap, int)); break;
         case 'u': o += fmt_uint(out + o, __builtin_va_arg(ap, unsigned), 10, 0, 0); break;
         case 'x': o += fmt_uint(out + o, __builtin_va_arg(ap, unsigned), 16, 0, 0); break;
+        case 'p':
+            out[o++] = '0'; out[o++] = 'x';
+            o += fmt_uint(out + o, (ULONGLONG)__builtin_va_arg(ap, void *), 16, 0, 0);
+            break;
         case 'c': out[o++] = (char)__builtin_va_arg(ap, int); break;
         case 's': {
             const char *s = __builtin_va_arg(ap, const char *);
@@ -645,4 +670,146 @@ __declspec(dllexport) int wsprintfA(char *out, const char *fmt, ...)
     out[o] = 0;
     __builtin_va_end(ap);
     return o;
+}
+
+/* ------------------------------------------------------------------ */
+/* Thread / process information (from the TEB)                         */
+/* ------------------------------------------------------------------ */
+
+/* TEB offsets: ClientId.UniqueProcess 0x40, UniqueThread 0x48, LastError 0x68. */
+__declspec(dllexport) DWORD  GetLastError(void)        { return read_gs_dword(0x68); }
+__declspec(dllexport) void   SetLastError(DWORD e)     { write_gs_dword(0x68, e); }
+__declspec(dllexport) DWORD  GetCurrentProcessId(void) { return (DWORD)read_gs_qword(0x40); }
+__declspec(dllexport) DWORD  GetCurrentThreadId(void)  { return (DWORD)read_gs_qword(0x48); }
+__declspec(dllexport) HANDLE GetCurrentProcess(void)   { return (HANDLE)(ULONGLONG)-1; }
+__declspec(dllexport) HANDLE GetCurrentThread(void)    { return (HANDLE)(ULONGLONG)-2; }
+
+/* ------------------------------------------------------------------ */
+/* Interlocked operations                                              */
+/* ------------------------------------------------------------------ */
+
+typedef long LONG;
+
+__declspec(dllexport) LONG InterlockedIncrement(LONG volatile *p)
+{
+    return __sync_add_and_fetch(p, 1);
+}
+__declspec(dllexport) LONG InterlockedDecrement(LONG volatile *p)
+{
+    return __sync_sub_and_fetch(p, 1);
+}
+__declspec(dllexport) LONG InterlockedExchange(LONG volatile *p, LONG value)
+{
+    return __sync_lock_test_and_set(p, value);
+}
+__declspec(dllexport) LONG InterlockedCompareExchange(LONG volatile *dst,
+                                                      LONG exchange, LONG compare)
+{
+    return __sync_val_compare_and_swap(dst, compare, exchange);
+}
+
+/* ------------------------------------------------------------------ */
+/* Critical sections (recursive lock)                                  */
+/* ------------------------------------------------------------------ */
+
+typedef struct _CRIT { LONG lock; DWORD owner; LONG recursion; } CRIT;
+
+__declspec(dllexport) void InitializeCriticalSection(void *cs)
+{
+    CRIT *c = (CRIT *)cs;
+    c->lock = 0;
+    c->owner = 0;
+    c->recursion = 0;
+}
+
+__declspec(dllexport) void EnterCriticalSection(void *cs)
+{
+    CRIT *c = (CRIT *)cs;
+    DWORD me = GetCurrentThreadId();
+    if (c->owner == me) {
+        c->recursion++;
+        return;
+    }
+    while (!__sync_bool_compare_and_swap(&c->lock, 0, 1))
+        __asm__ volatile("pause"); /* spin; the timer preempts to run the owner */
+    c->owner = me;
+    c->recursion = 1;
+}
+
+__declspec(dllexport) void LeaveCriticalSection(void *cs)
+{
+    CRIT *c = (CRIT *)cs;
+    if (--c->recursion == 0) {
+        c->owner = 0;
+        __sync_lock_release(&c->lock);
+    }
+}
+
+__declspec(dllexport) void DeleteCriticalSection(void *cs) { (void)cs; }
+
+/* ------------------------------------------------------------------ */
+/* Virtual memory                                                      */
+/* ------------------------------------------------------------------ */
+
+__declspec(dllexport) LPVOID VirtualAlloc(LPVOID addr, SIZE_T size, DWORD type,
+                                          DWORD protect)
+{
+    (void)addr; (void)type; (void)protect; /* our allocator picks the address */
+    return nt_alloc(size);
+}
+
+__declspec(dllexport) BOOL VirtualFree(LPVOID addr, SIZE_T size, DWORD type)
+{
+    (void)addr; (void)size; (void)type; /* no unmap yet */
+    return 1;
+}
+
+__declspec(dllexport) BOOL VirtualProtect(LPVOID addr, SIZE_T size,
+                                          DWORD newProtect, DWORD *oldProtect)
+{
+    void *base = addr;
+    ULONGLONG region = size;
+    NTSTATUS st = NtProtectVirtualMemory(NT_INVALID_HANDLE, &base, &region,
+                                         newProtect, oldProtect);
+    return NT_SUCCESS(st);
+}
+
+/* ------------------------------------------------------------------ */
+/* Performance counter (backed by KUSER_SHARED_DATA system time)       */
+/* ------------------------------------------------------------------ */
+
+__declspec(dllexport) BOOL QueryPerformanceCounter(long long *count)
+{
+    if (count)
+        *count = (long long)read_ksystem_time(0x014); /* 100 ns units */
+    return 1;
+}
+
+__declspec(dllexport) BOOL QueryPerformanceFrequency(long long *freq)
+{
+    if (freq)
+        *freq = 10000000; /* 100 ns tick -> 10 MHz */
+    return 1;
+}
+
+/* ------------------------------------------------------------------ */
+/* Module file name (from PEB->ProcessParameters ImagePathName)        */
+/* ------------------------------------------------------------------ */
+
+__declspec(dllexport) DWORD GetModuleFileNameA(HANDLE module, char *buf,
+                                               DWORD size)
+{
+    (void)module;
+    PEB *peb = NtCurrentPeb();
+    unsigned char *pp = (unsigned char *)peb->ProcessParameters;
+    DWORD n = 0;
+    if (pp && buf && size) {
+        WORD   len = *(WORD *)(pp + 0x60) / 2;  /* ImagePathName.Length (chars) */
+        WCHAR *w   = *(WCHAR **)(pp + 0x68);     /* ImagePathName.Buffer          */
+        for (; n < len && n < size - 1 && w[n]; n++)
+            buf[n] = (char)w[n];
+    }
+    if (buf && size)
+        buf[n] = 0;
+    return n;
 }

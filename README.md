@@ -136,6 +136,13 @@ The kernel currently:
   OS-specific code) compiles and runs on NTOS unchanged. `hello.exe` is exactly
   that; `testapp.exe` now enters through the same startup too. This is the base
   for eventually dropping in ready-made programs.
+- **A wider Win32 surface**, toward the functions real binaries import:
+  `GetCurrentProcessId` / `GetCurrentThreadId` / `GetLastError` / `SetLastError`
+  (read from the TEB), `GetModuleFileNameA`, `VirtualAlloc` / `VirtualFree` /
+  `VirtualProtect` (the last over a new `NtProtectVirtualMemory` service that
+  re-applies page protection), `QueryPerformanceCounter` /
+  `QueryPerformanceFrequency` (off the shared-data clock), the `Interlocked*`
+  family, and recursive **critical sections**.
 
 See [`docs/ROADMAP.md`](docs/ROADMAP.md) for what comes next (physical/virtual
 memory manager, object manager, threads & scheduler, system-call boundary, and

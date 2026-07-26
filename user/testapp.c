@@ -68,6 +68,29 @@ __declspec(dllimport) int   printf(const char *fmt, ...);
 __declspec(dllimport) void *malloc(SIZE_T n);
 __declspec(dllimport) void  free(void *p);
 
+/* Wider Win32 surface (kernel32). */
+typedef long LONG;
+typedef struct { BYTE opaque[40]; } CRITICAL_SECTION;
+#define MEM_COMMIT     0x1000
+#define MEM_RESERVE    0x2000
+#define PAGE_READONLY  0x02
+#define PAGE_READWRITE 0x04
+
+__declspec(dllimport) DWORD  GetCurrentProcessId(void);
+__declspec(dllimport) DWORD  GetCurrentThreadId(void);
+__declspec(dllimport) DWORD  GetLastError(void);
+__declspec(dllimport) void   SetLastError(DWORD);
+__declspec(dllimport) DWORD  GetModuleFileNameA(HANDLE, char *, DWORD);
+__declspec(dllimport) LPVOID VirtualAlloc(LPVOID, SIZE_T, DWORD, DWORD);
+__declspec(dllimport) BOOL   VirtualProtect(LPVOID, SIZE_T, DWORD, DWORD *);
+__declspec(dllimport) BOOL   QueryPerformanceCounter(long long *);
+__declspec(dllimport) BOOL   QueryPerformanceFrequency(long long *);
+__declspec(dllimport) LONG   InterlockedIncrement(LONG volatile *);
+__declspec(dllimport) void   InitializeCriticalSection(void *);
+__declspec(dllimport) void   EnterCriticalSection(void *);
+__declspec(dllimport) void   LeaveCriticalSection(void *);
+__declspec(dllimport) void   DeleteCriticalSection(void *);
+
 static HANDLE g_out;
 
 static DWORD str_len(const char *s)
@@ -253,6 +276,61 @@ static void demo_win32_crt(void)
     }
 }
 
+/* Exercise the wider Win32 surface real programs lean on. */
+static void demo_syswin(void)
+{
+    char line[160];
+    print("\n-- wider Win32 (ids, VirtualAlloc/Protect, QPC, interlocked, crit) --\n");
+
+    wsprintfA(line, "  GetCurrentProcessId=%u GetCurrentThreadId=%u\n",
+              GetCurrentProcessId(), GetCurrentThreadId());
+    print(line);
+
+    char path[128];
+    GetModuleFileNameA(0, path, sizeof(path));
+    wsprintfA(line, "  GetModuleFileNameA -> %s\n", path);
+    print(line);
+
+    SetLastError(123);
+    wsprintfA(line, "  SetLastError(123); GetLastError=%u\n", GetLastError());
+    print(line);
+
+    /* VirtualAlloc a page, write it, flip it read-only, flip it back. */
+    int *mem = (int *)VirtualAlloc(0, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    DWORD oldp = 0;
+    if (mem) {
+        mem[0] = 0xCAFE;
+        BOOL ro = VirtualProtect(mem, 4096, PAGE_READONLY, &oldp);
+        VirtualProtect(mem, 4096, PAGE_READWRITE, &oldp);
+        wsprintfA(line, "  VirtualAlloc=%p mem[0]=0x%x VirtualProtect=%d\n",
+                  (LPVOID)mem, mem[0], ro);
+        print(line);
+    }
+
+    /* Time a Sleep with the performance counter. */
+    long long freq, t0, t1;
+    QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&t0);
+    Sleep(20);
+    QueryPerformanceCounter(&t1);
+    wsprintfA(line, "  QPC: freq=%d, Sleep(20) took ~%d ms\n",
+              (int)freq, (int)((t1 - t0) * 1000 / freq));
+    print(line);
+
+    /* Interlocked counter under a critical section. */
+    CRITICAL_SECTION cs;
+    InitializeCriticalSection(&cs);
+    LONG counter = 0;
+    EnterCriticalSection(&cs);
+    for (int i = 0; i < 5; i++)
+        InterlockedIncrement(&counter);
+    LeaveCriticalSection(&cs);
+    DeleteCriticalSection(&cs);
+    wsprintfA(line, "  InterlockedIncrement x5 under a critical section = %d\n",
+              (int)counter);
+    print(line);
+}
+
 static DWORD WorkerThread(LPVOID param)
 {
     (void)param;
@@ -291,6 +369,9 @@ int main(void)
 
     /* Broader Win32 surface + the mini-CRT. */
     demo_win32_crt();
+
+    /* The wider Win32 surface real programs rely on. */
+    demo_syswin();
 
     /* Return through the CRT startup, which calls ExitProcess for us. */
     print("main: returning 0 (CRT startup will ExitProcess)\n");

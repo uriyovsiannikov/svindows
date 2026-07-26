@@ -208,6 +208,15 @@ every clock tick, so `GetTickCount` just reads and scales the shared value. The
 command line lives in a `RTL_USER_PROCESS_PARAMETERS` block that `PEB->
 ProcessParameters` points at, where `GetCommandLine` finds it.
 
+kernel32 covers a widening slice of the API real programs import:
+`GetCurrentProcessId`/`GetCurrentThreadId`/`GetLastError`/`SetLastError` read
+straight from the TEB via GS (`ClientId` at 0x40/0x48, `LastErrorValue` at 0x68);
+`VirtualAlloc`/`VirtualProtect` run over `NtAllocateVirtualMemory` and a
+`NtProtectVirtualMemory` service that re-applies page protection (`MmProtectRange`
+keeps each frame, flips its writable bit); `QueryPerformanceCounter` reads the
+shared-data clock; and `Interlocked*` plus recursive critical sections give the
+atomics and locking a threaded program expects.
+
 ## Running a standard program
 
 A program does not need NTOS-specific glue to run. The linker's default console

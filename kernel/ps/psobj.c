@@ -152,6 +152,7 @@ UINT64 NtCreateThreadEx(UINT64 *a)
     teb->NtTib.StackBase = (PVOID)stack_top;
     teb->NtTib.StackLimit = (PVOID)stack_base;
     teb->ProcessEnvironmentBlock = (PVOID)PROCESS_PEB_VA;
+    teb->ClientId.UniqueProcess = (HANDLE)(ULONG_PTR)1;
 
     /* Waitable thread object (signaled on exit). */
     POBJECT obj;

@@ -186,6 +186,33 @@ static UINT64 NtDelayExecution(UINT64 *a)
     return (UINT64)STATUS_SUCCESS;
 }
 
+/*
+ * NtProtectVirtualMemory(ProcessHandle, *BaseAddress, *RegionSize, NewProtect,
+ *                        *OldProtect) - change page protection on a range.
+ */
+static UINT64 NtProtectVirtualMemory(UINT64 *a)
+{
+    PVOID  *base_ptr = (PVOID *)a[1];
+    SIZE_T *size_ptr = (SIZE_T *)a[2];
+    UINT32  protect  = (UINT32)a[3];
+    UINT32 *old_ptr  = (UINT32 *)a[4];
+
+    if (!MmProbeForRead((UINT64)base_ptr, sizeof(PVOID)) ||
+        !MmProbeForRead((UINT64)size_ptr, sizeof(SIZE_T)))
+        return (UINT64)STATUS_ACCESS_VIOLATION;
+
+    UINT64 base = (UINT64)*base_ptr;
+    UINT64 size = *size_ptr;
+    /* Writable protections: PAGE_READWRITE|WRITECOPY|EXECUTE_READWRITE|
+     * EXECUTE_WRITECOPY = 0x04|0x08|0x40|0x80. */
+    BOOLEAN writable = (protect & 0xCC) != 0;
+    MmProtectRange(base, size, writable);
+
+    if (old_ptr && MmProbeForWrite((UINT64)old_ptr, sizeof(UINT32)))
+        *old_ptr = 0x04; /* report the previous protection as PAGE_READWRITE */
+    return (UINT64)STATUS_SUCCESS;
+}
+
 /* NtLoadLibrary(name) - load a DLL by name at runtime; returns its base or 0.
  * (Not a real NT service name; our loader hook for kernel32's LoadLibraryA.) */
 static UINT64 NtLoadLibrary(UINT64 *a)
@@ -226,6 +253,7 @@ static KI_SERVICE KiServiceTable[NTOS_MAX_SYSCALL];
 #define SN_NtSetValueKey           0x5D
 #define SN_NtTerminateThread       0x50
 #define SN_NtDelayExecution        0x31
+#define SN_NtProtectVirtualMemory  0x4D
 /* NTOS-private services (no Windows equivalent) live above the real range. */
 #define SN_NtDisplayString         0xF0
 #define SN_NtDisplayNumber         0xF1
@@ -248,6 +276,7 @@ void KiInitializeServiceTable(void)
     KiServiceTable[SN_NtSetValueKey]           = NtSetValueKey;
     KiServiceTable[SN_NtTerminateThread]       = NtTerminateThread;
     KiServiceTable[SN_NtDelayExecution]        = NtDelayExecution;
+    KiServiceTable[SN_NtProtectVirtualMemory]  = NtProtectVirtualMemory;
     KiServiceTable[SN_NtDisplayString]         = NtDisplayString;
     KiServiceTable[SN_NtDisplayNumber]         = NtDisplayNumber;
     KiServiceTable[SN_NtLoadLibrary]           = NtLoadLibrary;

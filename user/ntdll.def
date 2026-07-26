@@ -4,6 +4,7 @@ EXPORTS
     NtDisplayNumber
     NtTerminateThread
     NtAllocateVirtualMemory
+    NtProtectVirtualMemory
     NtCreateFile
     NtReadFile
     NtWriteFile

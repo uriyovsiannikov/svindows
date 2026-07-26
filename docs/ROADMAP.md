@@ -152,12 +152,17 @@ the kernel allocates from.
 - [x] A **CRT startup** (`crt0.c`'s `mainCRTStartup`) + minimal libc headers, so
       a plain portable C program (`int main()`, `<stdio.h>`/`<stdlib.h>`/
       `<string.h>`, no OS-specific code) compiles and runs unchanged (`hello.exe`).
-- [ ] Grow toward running *unmodified, ready-made* Windows binaries: a fuller
-      Win32/CRT surface (VirtualAlloc/VirtualProtect, TLS, critical sections,
-      GetLastError, ...), TLS-directory + load-config (security cookie) handling
-      in the loader, kernel SEH (`.pdata`/`RUNTIME_FUNCTION`) so exceptions and
-      fault-safe probes work, and eventually `user32`/`gdi32` for GUI programs —
-      the ReactOS/Wine-scale endgame that leads to a real desktop shell.
+- [x] A wider Win32 surface real binaries import: `GetCurrentProcessId`/
+      `GetCurrentThreadId`/`GetLastError`/`SetLastError` (TEB), `GetModuleFileNameA`,
+      `VirtualAlloc`/`VirtualFree`/`VirtualProtect` (over a new
+      `NtProtectVirtualMemory`), `QueryPerformanceCounter`/`QueryPerformanceFrequency`,
+      the `Interlocked*` family, and recursive critical sections.
+- [ ] Keep growing toward *unmodified, ready-made* Windows binaries: TLS
+      (`TlsAlloc`/`TlsGetValue`, TEB slots), a fuller CRT/`msvcrt`, TLS-directory +
+      load-config (security cookie) handling in the loader, kernel SEH
+      (`.pdata`/`RUNTIME_FUNCTION`) so exceptions and fault-safe probes work, and
+      eventually `user32`/`gdi32` for GUI programs — the ReactOS/Wine-scale
+      endgame that leads to a real desktop shell.
 
 ## Phase 7 — Graphics and the road to a desktop (in progress)
 

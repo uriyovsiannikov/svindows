@@ -33,6 +33,7 @@ SYSCALL_STUB NtWriteFile,             0x05
 SYSCALL_STUB NtClose,                 0x0C
 SYSCALL_STUB NtOpenKey,               0x0F
 SYSCALL_STUB NtAllocateVirtualMemory, 0x15
+SYSCALL_STUB NtProtectVirtualMemory,  0x4D
 SYSCALL_STUB NtQueryValueKey,         0x17
 SYSCALL_STUB NtCreateKey,             0x1A
 SYSCALL_STUB NtCreateEvent,           0x48

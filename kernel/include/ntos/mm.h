@@ -140,6 +140,10 @@ BOOLEAN MmProbeForWrite(UINT64 va, UINT64 len);
  * pointer that could change or fault. FALSE if any pointer fails to probe. */
 BOOLEAN MmCaptureUnicodeName(UINT64 ustr_va, char *out, SIZE_T out_size);
 
+/* Re-apply page protection to a range of already-mapped pages (keeps their
+ * physical frames, changes the writable bit). Backs VirtualProtect. */
+void MmProtectRange(UINT64 va, UINT64 size, BOOLEAN writable);
+
 /* Top-level Mm bring-up: parse map, start PMM, install real paging. */
 void MmInitialize(UINT64 mb_info_phys);
 

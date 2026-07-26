@@ -226,3 +226,15 @@ BOOLEAN MmCaptureUnicodeName(UINT64 ustr_va, char *out, SIZE_T out_size)
     out[i] = 0;
     return TRUE;
 }
+
+void MmProtectRange(UINT64 va, UINT64 size, BOOLEAN writable)
+{
+    UINT64 first = PAGE_ALIGN(va);
+    UINT64 last = PAGE_ALIGN_UP(va + size);
+    UINT64 flags = PTE_USER | (writable ? PTE_WRITE : 0);
+    for (UINT64 p = first; p < last; p += PAGE_SIZE) {
+        UINT64 pa = MmGetPhysicalAddress(p);
+        if (pa != MM_INVALID_PHYS)
+            MmMapPage(p, pa & ~PAGE_MASK, flags); /* same frame, new flags */
+    }
+}
