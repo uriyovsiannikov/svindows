@@ -111,6 +111,15 @@ The kernel currently:
   the **real Windows 7 SP1 x64 syscall numbers**, and kernel32 builds these
   structures exactly as the real one does — a concrete step toward one day
   driving the kernel with an unmodified `ntdll`.
+- **Broader Win32 + a mini-CRT.** A **`KUSER_SHARED_DATA`** page at the fixed
+  user address `0x7FFE0000` (kernel-updated each tick) backs `GetTickCount` /
+  `GetTickCount64` / `GetSystemTimeAsFileTime` with no system call, exactly as on
+  Windows. `Sleep` blocks through `NtDelayExecution`; `GetCommandLineA` reads the
+  command line from `PEB->ProcessParameters`; and kernel32 gains `lstrlenA` /
+  `lstrcpyA` / `lstrcatA` / `wsprintfA`. A small **`msvcrt.dll`** (`printf`,
+  `malloc`/`free`, `strlen`/`strcpy`/`strcmp`, `memcpy`/`memset`, `puts`) layers
+  a C runtime over the Win32 API, so a normal C program links against it instead
+  of a host libc.
 
 See [`docs/ROADMAP.md`](docs/ROADMAP.md) for what comes next (physical/virtual
 memory manager, object manager, threads & scheduler, system-call boundary, and
@@ -155,7 +164,7 @@ kernel/
   ps/            Process manager (PEB/TEB, user process creation)
   io/            I/O manager (ATA PIO block driver, FAT32 filesystem)
   cm/            Configuration Manager (the registry)
-user/            User-space sources (ntdll, kernel32, advapi32, extra, testapp)
+user/            User-space sources (ntdll, kernel32, advapi32, msvcrt, extra, testapp)
 docs/            architecture notes and roadmap
 scripts/         helper scripts
 ```

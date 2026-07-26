@@ -73,6 +73,7 @@ extern HANDLE    NtCreateThread(LPVOID entry, LPVOID arg);
 extern long      NtWaitForSingleObject(HANDLE h);
 extern void      NtTerminateThread(void);
 extern HANDLE    NtLoadLibrary(const char *name);
+extern NTSTATUS  NtDelayExecution(int Alertable, long long *Interval);
 
 void *memset(void *dst, int v, SIZE_T n); /* defined below */
 
@@ -470,4 +471,163 @@ __declspec(dllexport) BOOL HeapFree(HANDLE heap, DWORD flags, LPVOID ptr)
         }
     }
     return 1;
+}
+
+/* ------------------------------------------------------------------ */
+/* Time: KUSER_SHARED_DATA (the read-only page at 0x7FFE0000)          */
+/* ------------------------------------------------------------------ */
+
+#define KUSD ((volatile unsigned char *)(ULONGLONG)0x7FFE0000ULL)
+
+/* Read a KSYSTEM_TIME (Low, High1, High2) lock-free from the shared page. */
+static ULONGLONG read_ksystem_time(unsigned off)
+{
+    for (;;) {
+        int high1 = *(volatile int *)(KUSD + off + 0x4);
+        unsigned low = *(volatile unsigned *)(KUSD + off + 0x0);
+        int high2 = *(volatile int *)(KUSD + off + 0x8);
+        if (high1 == high2)
+            return ((ULONGLONG)(unsigned)high1 << 32) | low;
+    }
+}
+
+__declspec(dllexport) ULONGLONG GetTickCount64(void)
+{
+    ULONGLONG ticks = read_ksystem_time(0x320);          /* TickCount     */
+    unsigned mult = *(volatile unsigned *)(KUSD + 0x004); /* Multiplier    */
+    return (ticks * mult) >> 24;                          /* -> milliseconds */
+}
+
+__declspec(dllexport) DWORD GetTickCount(void)
+{
+    return (DWORD)GetTickCount64();
+}
+
+__declspec(dllexport) void GetSystemTimeAsFileTime(void *lpFileTime)
+{
+    ULONGLONG t = read_ksystem_time(0x014); /* SystemTime, 100 ns units */
+    if (lpFileTime) {
+        ((DWORD *)lpFileTime)[0] = (DWORD)t;
+        ((DWORD *)lpFileTime)[1] = (DWORD)(t >> 32);
+    }
+}
+
+__declspec(dllexport) void Sleep(DWORD ms)
+{
+    /* Relative delay: negative 100 ns units. */
+    long long interval = -(long long)ms * 10000;
+    NtDelayExecution(0, &interval);
+}
+
+/* ------------------------------------------------------------------ */
+/* Command line (from PEB->ProcessParameters)                          */
+/* ------------------------------------------------------------------ */
+
+static char g_cmdline[260];
+
+__declspec(dllexport) char *GetCommandLineA(void)
+{
+    PEB *peb = NtCurrentPeb();
+    unsigned char *pp = (unsigned char *)peb->ProcessParameters;
+    if (pp) {
+        /* CommandLine UNICODE_STRING at offset 0x70; Buffer at +8. */
+        WORD len = *(WORD *)(pp + 0x70) / 2;
+        WCHAR *buf = *(WCHAR **)(pp + 0x78);
+        unsigned i = 0;
+        for (; i < len && i < sizeof(g_cmdline) - 1 && buf[i]; i++)
+            g_cmdline[i] = (char)buf[i];
+        g_cmdline[i] = 0;
+    }
+    return g_cmdline;
+}
+
+/* ------------------------------------------------------------------ */
+/* String helpers                                                      */
+/* ------------------------------------------------------------------ */
+
+__declspec(dllexport) int lstrlenA(const char *s)
+{
+    int n = 0;
+    while (s && s[n])
+        n++;
+    return n;
+}
+
+__declspec(dllexport) char *lstrcpyA(char *dst, const char *src)
+{
+    char *d = dst;
+    while ((*d++ = *src++))
+        ;
+    return dst;
+}
+
+__declspec(dllexport) char *lstrcatA(char *dst, const char *src)
+{
+    char *d = dst;
+    while (*d)
+        d++;
+    while ((*d++ = *src++))
+        ;
+    return dst;
+}
+
+/* Format an unsigned value into buf (base 10 or 16); returns the length. */
+static int fmt_uint(char *buf, ULONGLONG v, int base, int is_signed,
+                    long long sv)
+{
+    char tmp[24];
+    int n = 0, len = 0;
+    int neg = 0;
+    if (is_signed) {
+        if (sv < 0) {
+            neg = 1;
+            v = (ULONGLONG)(-sv);
+        } else {
+            v = (ULONGLONG)sv;
+        }
+    }
+    if (v == 0)
+        tmp[n++] = '0';
+    while (v) {
+        int d = (int)(v % base);
+        tmp[n++] = (char)(d < 10 ? '0' + d : 'a' + d - 10);
+        v /= base;
+    }
+    if (neg)
+        buf[len++] = '-';
+    while (n)
+        buf[len++] = tmp[--n];
+    return len;
+}
+
+/* A small wsprintfA: supports %d %u %x %s %c %% (no width/precision). */
+__declspec(dllexport) int wsprintfA(char *out, const char *fmt, ...)
+{
+    __builtin_va_list ap;
+    __builtin_va_start(ap, fmt);
+    int o = 0;
+    for (const char *p = fmt; *p; p++) {
+        if (*p != '%') {
+            out[o++] = *p;
+            continue;
+        }
+        p++;
+        switch (*p) {
+        case 'd': o += fmt_uint(out + o, 0, 10, 1, __builtin_va_arg(ap, int)); break;
+        case 'u': o += fmt_uint(out + o, __builtin_va_arg(ap, unsigned), 10, 0, 0); break;
+        case 'x': o += fmt_uint(out + o, __builtin_va_arg(ap, unsigned), 16, 0, 0); break;
+        case 'c': out[o++] = (char)__builtin_va_arg(ap, int); break;
+        case 's': {
+            const char *s = __builtin_va_arg(ap, const char *);
+            while (s && *s)
+                out[o++] = *s++;
+            break;
+        }
+        case '%': out[o++] = '%'; break;
+        default:  out[o++] = '%'; out[o++] = *p; break;
+        }
+    }
+    out[o] = 0;
+    __builtin_va_end(ap);
+    return o;
 }

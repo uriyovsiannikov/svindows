@@ -49,6 +49,8 @@ KERNEL32   := $(BUILD)/kernel32.dll
 KERNEL32LIB := $(BUILD)/kernel32.lib
 ADVAPI32   := $(BUILD)/advapi32.dll
 ADVAPI32LIB := $(BUILD)/advapi32.lib
+MSVCRT     := $(BUILD)/msvcrt.dll
+MSVCRTLIB  := $(BUILD)/msvcrt.lib
 EXTRA      := $(BUILD)/extra.dll
 DISK       := $(BUILD)/disk.img
 LLDLINK    := lld-link
@@ -101,6 +103,15 @@ $(ADVAPI32): user/advapi32.c $(NTDLL)
 	           $(BUILD)/advapi32.obj $(NTDLLLIB)
 	@echo "  DLL   $(ADVAPI32)"
 
+# msvcrt.dll: a tiny C runtime (printf/malloc/str*) over kernel32.
+$(MSVCRT): user/msvcrt.c $(KERNEL32)
+	@mkdir -p $(BUILD)
+	$(CLANGWIN) -c user/msvcrt.c -o $(BUILD)/msvcrt.obj
+	$(LLDLINK) /dll /noentry /machine:x64 /nodefaultlib /base:0x1E0000000 \
+	           /out:$(MSVCRT) /implib:$(MSVCRTLIB) \
+	           $(BUILD)/msvcrt.obj $(KERNEL32LIB)
+	@echo "  DLL   $(MSVCRT)"
+
 # extra.dll: a standalone DLL loaded at runtime via LoadLibraryA (not linked
 # into the app's import chain). Distinct preferred base so it never collides.
 $(EXTRA): user/extra.c
@@ -110,17 +121,19 @@ $(EXTRA): user/extra.c
 	           /out:$(EXTRA) /implib:$(BUILD)/extra.lib $(BUILD)/extra.obj
 	@echo "  DLL   $(EXTRA)"
 
-# testapp.exe: a normal Win32 program (C), linked against kernel32 + advapi32.
-$(TESTAPP): user/testapp.c $(KERNEL32) $(ADVAPI32)
+# testapp.exe: a normal Win32 program (C), linked against kernel32 + advapi32
+# + msvcrt.
+$(TESTAPP): user/testapp.c $(KERNEL32) $(ADVAPI32) $(MSVCRT)
 	@mkdir -p $(BUILD)
 	$(CLANGWIN) -c user/testapp.c -o $(BUILD)/testapp.obj
 	$(LLDLINK) /subsystem:console /entry:Start /nodefaultlib /machine:x64 \
-	           /out:$@ $(BUILD)/testapp.obj $(KERNEL32LIB) $(ADVAPI32LIB)
+	           /out:$@ $(BUILD)/testapp.obj $(KERNEL32LIB) $(ADVAPI32LIB) \
+	           $(MSVCRTLIB)
 	@echo "  PE    $@"
 
 # FAT32 disk image holding the user-space executables, read by the kernel's
 # ATA + FAT drivers at runtime.
-$(DISK): $(TESTAPP) $(KERNEL32) $(NTDLL) $(ADVAPI32) $(EXTRA) user/message.txt
+$(DISK): $(TESTAPP) $(KERNEL32) $(NTDLL) $(ADVAPI32) $(MSVCRT) $(EXTRA) user/message.txt
 	@mkdir -p $(BUILD)
 	dd if=/dev/zero of=$(DISK) bs=1M count=64 status=none
 	mformat -i $(DISK) -F -v NTOSDISK ::
@@ -128,6 +141,7 @@ $(DISK): $(TESTAPP) $(KERNEL32) $(NTDLL) $(ADVAPI32) $(EXTRA) user/message.txt
 	mcopy -i $(DISK) $(KERNEL32) ::KERNEL32.DLL
 	mcopy -i $(DISK) $(NTDLL) ::NTDLL.DLL
 	mcopy -i $(DISK) $(ADVAPI32) ::ADVAPI32.DLL
+	mcopy -i $(DISK) $(MSVCRT) ::MSVCRT.DLL
 	mcopy -i $(DISK) $(EXTRA) ::EXTRA.DLL
 	mcopy -i $(DISK) user/message.txt ::MESSAGE.TXT
 	@echo "  DISK  $(DISK)"

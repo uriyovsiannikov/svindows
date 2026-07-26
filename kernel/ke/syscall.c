@@ -163,6 +163,29 @@ static UINT64 NtAllocateVirtualMemory(UINT64 *a)
     return (UINT64)STATUS_SUCCESS;
 }
 
+/*
+ * NtDelayExecution(BOOLEAN Alertable, PLARGE_INTEGER Interval) - block the
+ * caller for the (relative, negative, 100 ns units) interval. Implemented as a
+ * cooperative yield loop against the tick count (10 ms resolution).
+ */
+static UINT64 NtDelayExecution(UINT64 *a)
+{
+    INT64 *interval = (INT64 *)a[1];
+    if (!interval)
+        return (UINT64)STATUS_SUCCESS;
+
+    INT64 iv = *interval;
+    UINT64 ticks_100ns = (iv < 0) ? (UINT64)(-iv) : 0; /* only relative delays */
+    UINT64 wait = ticks_100ns / 100000ULL;             /* 100 ns -> 10 ms ticks */
+    if (wait == 0)
+        wait = 1;
+
+    UINT64 target = KeGetTickCount() + wait;
+    while (KeGetTickCount() < target)
+        KeYield();
+    return (UINT64)STATUS_SUCCESS;
+}
+
 /* NtLoadLibrary(name) - load a DLL by name at runtime; returns its base or 0.
  * (Not a real NT service name; our loader hook for kernel32's LoadLibraryA.) */
 static UINT64 NtLoadLibrary(UINT64 *a)
@@ -202,6 +225,7 @@ static KI_SERVICE KiServiceTable[NTOS_MAX_SYSCALL];
 #define SN_NtCreateFile            0x52
 #define SN_NtSetValueKey           0x5D
 #define SN_NtTerminateThread       0x50
+#define SN_NtDelayExecution        0x31
 /* NTOS-private services (no Windows equivalent) live above the real range. */
 #define SN_NtDisplayString         0xF0
 #define SN_NtDisplayNumber         0xF1
@@ -223,6 +247,7 @@ void KiInitializeServiceTable(void)
     KiServiceTable[SN_NtCreateFile]            = NtCreateFile;
     KiServiceTable[SN_NtSetValueKey]           = NtSetValueKey;
     KiServiceTable[SN_NtTerminateThread]       = NtTerminateThread;
+    KiServiceTable[SN_NtDelayExecution]        = NtDelayExecution;
     KiServiceTable[SN_NtDisplayString]         = NtDisplayString;
     KiServiceTable[SN_NtDisplayNumber]         = NtDisplayNumber;
     KiServiceTable[SN_NtLoadLibrary]           = NtLoadLibrary;

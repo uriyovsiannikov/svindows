@@ -138,9 +138,14 @@ the kernel allocates from.
       indexed by Windows 7 SP1 x64 numbers. (Registry/thread services still use
       simplified signatures; the exact numbers should be checked against a
       reference table before driving a real ntdll.)
+- [x] Broaden the Win32 surface + a mini-CRT: a `KUSER_SHARED_DATA` page at
+      `0x7FFE0000` backs `GetTickCount`/`GetSystemTimeAsFileTime` with no
+      syscall; `Sleep` (`NtDelayExecution`); `GetCommandLineA` from
+      `PEB->ProcessParameters`; `lstrlenA`/`lstrcpyA`/`lstrcatA`/`wsprintfA`; and
+      an `msvcrt.dll` (`printf`/`malloc`/`free`/`str*`/`mem*`) over the Win32 API.
 - [ ] Extend real signatures to the rest (`NtOpenKey`/`NtCreateThreadEx`/...),
       capture/probe user pointers, and grow the Win32 surface (`user32`/`gdi32`,
-      a real CRT, ...) so that *unmodified* Windows binaries can run — the
+      a fuller CRT, ...) so that *unmodified* Windows binaries can run — the
       ReactOS/Wine-scale endgame.
 
 ## Phase 7 — Graphics and the road to a desktop (in progress)

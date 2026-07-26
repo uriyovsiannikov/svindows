@@ -219,6 +219,9 @@ void KiSystemStartup(UINT32 magic, UINT32 mbi_phys)
     /* Phase 1: memory management. */
     MmInitialize((UINT64)mbi_phys);
 
+    /* Map the shared user-data page (tick count / system time for ring 3). */
+    KeInitializeSharedData();
+
     /* Bring up the framebuffer and draw the desktop; from here the kernel log
      * also renders on the graphical screen. */
     GfxInitialize();

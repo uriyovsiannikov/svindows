@@ -57,6 +57,17 @@ __declspec(dllimport) LONG RegQueryValueExA(HKEY, const char *, DWORD *, DWORD *
                                             BYTE *, DWORD *);
 __declspec(dllimport) LONG RegCloseKey(HKEY);
 
+/* More Win32 (kernel32). */
+__declspec(dllimport) DWORD GetTickCount(void);
+__declspec(dllimport) void  Sleep(DWORD ms);
+__declspec(dllimport) char *GetCommandLineA(void);
+__declspec(dllimport) int   wsprintfA(char *out, const char *fmt, ...);
+
+/* Mini-CRT (msvcrt). */
+__declspec(dllimport) int   printf(const char *fmt, ...);
+__declspec(dllimport) void *malloc(SIZE_T n);
+__declspec(dllimport) void  free(void *p);
+
 static HANDLE g_out;
 
 static DWORD str_len(const char *s)
@@ -214,6 +225,34 @@ static void demo_registry(void)
     }
 }
 
+/* Exercise the broader Win32 surface and the mini-CRT. */
+static void demo_win32_crt(void)
+{
+    print("\n-- more Win32 + CRT (tick count, Sleep, cmdline, printf) --\n");
+
+    char line[160];
+    wsprintfA(line, "  GetCommandLineA() = %s\n", GetCommandLineA());
+    print(line);
+
+    DWORD t0 = GetTickCount();
+    Sleep(50);
+    DWORD t1 = GetTickCount();
+    wsprintfA(line, "  Sleep(50): GetTickCount %u -> %u (%u ms elapsed)\n",
+              t0, t1, t1 - t0);
+    print(line);
+
+    /* msvcrt: printf and malloc/free. */
+    printf("  msvcrt printf: 2+2=%d, hex=%x, str=%s\n", 2 + 2, 255, "works");
+    int *arr = (int *)malloc(4 * sizeof(int));
+    if (arr) {
+        for (int i = 0; i < 4; i++)
+            arr[i] = i * i;
+        printf("  msvcrt malloc[4] = %d %d %d %d\n",
+               arr[0], arr[1], arr[2], arr[3]);
+        free(arr);
+    }
+}
+
 static DWORD WorkerThread(LPVOID param)
 {
     (void)param;
@@ -249,6 +288,9 @@ void Start(void)
 
     /* Read and write the registry. */
     demo_registry();
+
+    /* Broader Win32 surface + the mini-CRT. */
+    demo_win32_crt();
 
     print("main: exiting via ExitProcess\n");
     ExitProcess(0);

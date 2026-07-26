@@ -258,6 +258,7 @@ NORETURN void KeTerminateThread(void)
 void KeClockTick(void)
 {
     g_tick_count++;
+    KeUpdateSharedData(g_tick_count);
 
     PKTHREAD t = g_current_thread;
     if (t->Quantum > 0)

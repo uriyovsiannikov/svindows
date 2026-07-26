@@ -32,6 +32,9 @@ PKTHREAD PsCreateUserProcess(const char *name, UINT64 entry, UINT64 image_base,
 #define PROCESS_LDR_VA 0x0000000000062000ULL
 #define PROCESS_LDR_SIZE 0x2000ULL
 
+/* User page for RTL_USER_PROCESS_PARAMETERS (command line, image path). */
+#define PROCESS_PARAMS_VA 0x0000000000068000ULL
+
 /* Register the Event and Thread object types. Requires Ob. */
 void PsInitialize(void);
 

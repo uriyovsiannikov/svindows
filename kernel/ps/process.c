@@ -39,6 +39,23 @@ PKTHREAD PsCreateUserProcess(const char *name, UINT64 entry, UINT64 image_base,
         map_user_rw(PROCESS_LDR_VA + off);
     LdrBuildProcessModuleList(peb, PROCESS_LDR_VA, PROCESS_LDR_SIZE);
 
+    /* Process parameters: a minimal RTL_USER_PROCESS_PARAMETERS carrying the
+     * command line (ImagePathName at 0x60, CommandLine at 0x70), so GetCommandLine
+     * works. The wide strings live past the struct in the same page. */
+    UINT8 *params = map_user_rw(PROCESS_PARAMS_VA);
+    memset(params, 0, PAGE_SIZE);
+    UINT16 *cmdw = (UINT16 *)(params + 0x200);
+    UINT16 n = 0;
+    for (; name[n] && n < 200; n++)
+        cmdw[n] = (UINT16)(UCHAR)name[n];
+    cmdw[n] = 0;
+    for (int off = 0x60; off <= 0x70; off += 0x10) { /* ImagePathName, CommandLine */
+        *(UINT16 *)(params + off + 0) = (UINT16)(n * 2);       /* Length        */
+        *(UINT16 *)(params + off + 2) = (UINT16)(n * 2 + 2);   /* MaximumLength  */
+        *(void **)(params + off + 8) = cmdw;                   /* Buffer         */
+    }
+    peb->ProcessParameters = params;
+
     /* TEB: the per-thread block GS resolves to in ring 3. */
     PTEB teb = map_user_rw(USER_TEB_VA);
     memset(teb, 0, sizeof(*teb));

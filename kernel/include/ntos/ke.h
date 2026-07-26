@@ -245,6 +245,11 @@ NORETURN void KeTerminateThread(void);
 void      KeClockTick(void);
 UINT64    KeGetTickCount(void);
 
+/* KUSER_SHARED_DATA: the read-only page (user VA 0x7FFE0000) the kernel keeps
+ * current so ring 3 can read the tick count / system time without a syscall. */
+void      KeInitializeSharedData(void);
+void      KeUpdateSharedData(UINT64 ticks);
+
 /* Scheduler hooks used by the dispatcher (interrupts must be disabled). */
 void      KiReadyThread(PKTHREAD thread);   /* move a waiting thread to Ready */
 void      KiBlockCurrentThread(void);       /* current is Waiting -> reschedule */

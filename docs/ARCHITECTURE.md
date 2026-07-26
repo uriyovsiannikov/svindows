@@ -182,6 +182,19 @@ from the root, and a real key handle passes through as the parent for a relative
 open — so `app.exe → advapi32 → ntdll → syscall → Cm` is the full path a
 registry call takes.
 
+## The user-mode runtime
+
+Above `ntdll`, the DLLs a Windows program expects are reproduced in miniature.
+`kernel32.dll` carries the process runtime (module/symbol lookup, the heap,
+threads, files) plus time and string helpers; `advapi32.dll` the registry
+`Reg*` API; and `msvcrt.dll` a small C runtime (`printf`, `malloc`/`free`,
+`str*`/`mem*`) layered on the Win32 API. Time reads avoid a system call the way
+Windows does: the kernel maps a read-only **`KUSER_SHARED_DATA`** page at the
+fixed user address `0x7FFE0000` and refreshes its tick count / system time on
+every clock tick, so `GetTickCount` just reads and scales the shared value. The
+command line lives in a `RTL_USER_PROCESS_PARAMETERS` block that `PEB->
+ProcessParameters` points at, where `GetCommandLine` finds it.
+
 ## Executive components
 
 The directory names match NT's internal prefixes, so a symbol like
