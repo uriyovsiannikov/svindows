@@ -22,9 +22,14 @@ extern KiSystemServiceDispatch
 global KiSystemCallEntry
 KiSystemCallEntry:
     swapgs                        ; GS -> kernel KPCR
-    mov     [gs:0], rsp           ; save user RSP
+    mov     [gs:0], rsp           ; momentary scratch for the user RSP
     mov     rsp, [gs:8]           ; load this thread's kernel stack top
 
+    ; Save the user RSP on THIS thread's kernel stack, not the shared KPCR slot:
+    ; a syscall may block and switch to another thread whose own syscall entry
+    ; would clobber the per-CPU scratch. Keeping it on the kernel stack makes it
+    ; per-thread and safe across a block.
+    push    qword [gs:0]          ; user RSP
     push    rcx                   ; user RIP  (SYSCALL saved it in RCX)
     push    r11                   ; user RFLAGS (SYSCALL saved it in R11)
 
@@ -43,25 +48,30 @@ KiSystemCallEntry:
     mov     r8,  r9               ; a4  -> arg5
     ;   arg3 (RDX) already holds a2
 
-    ; RSP is 16-byte aligned here (kernel top, minus four 8-byte pushes).
+    sub     rsp, 8                ; realign to 16 (five 8-byte pushes above)
     call    KiSystemServiceDispatch
+    add     rsp, 8
     ; return value already in RAX for the user
 
     pop     rsi                   ; restore caller's RSI
     pop     rdi                   ; restore caller's RDI
     pop     r11                   ; user RFLAGS
     pop     rcx                   ; user RIP
-    mov     rsp, [gs:0]           ; restore user RSP
+    pop     rsp                   ; user RSP (from this thread's kernel stack)
     swapgs                        ; GS -> user
     o64 sysret                    ; back to ring 3 (RIP=RCX, RFLAGS=R11)
 
-; void KiEnterUserMode(UINT64 entry /*rdi*/, UINT64 user_stack /*rsi*/);
-;   Builds an IRETQ frame and drops to ring 3. Never returns.
+; void KiEnterUserMode(UINT64 entry /*rdi*/, UINT64 user_stack /*rsi*/,
+;                      UINT64 arg /*rdx*/);
+;   Builds an IRETQ frame and drops to ring 3, passing `arg` in RCX (the Windows
+;   first-argument register). Never returns.
 global KiEnterUserMode
 KiEnterUserMode:
     mov     ax, 0x1B              ; user data selector (RPL 3)
     mov     ds, ax
     mov     es, ax
+
+    mov     rcx, rdx              ; entry-point argument (Windows: first arg = RCX)
 
     ; Switch the active GS base to this thread's TEB (held in KERNEL_GS_BASE by
     ; the scheduler) before entering ring 3.

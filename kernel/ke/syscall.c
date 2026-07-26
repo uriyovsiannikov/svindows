@@ -8,6 +8,7 @@
 #include <ntos/ke.h>
 #include <ntos/mm.h>
 #include <ntos/io.h>
+#include <ntos/ps.h>
 #include <nt/ntstatus.h>
 
 /* --- Model-specific registers we program. --- */
@@ -159,6 +160,10 @@ static KI_SERVICE KiServiceTable[] = {
     NtReadFile,              /* 5 */
     NtWriteFile,             /* 6 */
     NtClose,                 /* 7 */
+    NtCreateEvent,           /* 8 */
+    NtSetEvent,              /* 9 */
+    NtWaitForSingleObject,   /* 10 */
+    NtCreateThread,          /* 11 */
 };
 
 #define KI_SERVICE_COUNT (sizeof(KiServiceTable) / sizeof(KiServiceTable[0]))

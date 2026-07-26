@@ -118,12 +118,56 @@ typedef enum _KTHREAD_STATE {
     ThreadStateInitialized = 0,
     ThreadStateReady,
     ThreadStateRunning,
+    ThreadStateWaiting,
     ThreadStateTerminated,
 } KTHREAD_STATE;
 
 typedef void (*PKSTART_ROUTINE)(PVOID StartContext);
 
 struct _KPROCESS;
+struct _KTHREAD;
+
+/* ------------------------------------------------------------------ */
+/* Dispatcher (waitable) objects                                       */
+/* ------------------------------------------------------------------ */
+
+typedef enum _DISPATCHER_TYPE {
+    EventNotificationObject = 0, /* stays signaled until reset */
+    EventSynchronizationObject,  /* auto-reset: one waiter consumes it */
+    SemaphoreObject,             /* SignalState is the count */
+    MutantObject,                /* 1 = free, 0 = held */
+    ThreadObject,                /* signaled when the thread terminates */
+} DISPATCHER_TYPE;
+
+/*
+ * DISPATCHER_HEADER - the common prefix of every waitable kernel object. A
+ * thread waits on an object by casting the object body to this header, so every
+ * waitable object body must begin with one.
+ */
+typedef struct _DISPATCHER_HEADER {
+    LONG         Type;         /* DISPATCHER_TYPE */
+    volatile LONG SignalState;
+    LIST_ENTRY   WaitListHead; /* KWAIT_BLOCKs of waiting threads */
+} DISPATCHER_HEADER, *PDISPATCHER_HEADER;
+
+typedef struct _KWAIT_BLOCK {
+    LIST_ENTRY        WaitListEntry;
+    struct _KTHREAD  *Thread;
+    PDISPATCHER_HEADER Object;
+} KWAIT_BLOCK, *PKWAIT_BLOCK;
+
+typedef struct _KEVENT {
+    DISPATCHER_HEADER Header;
+} KEVENT, *PKEVENT;
+
+typedef struct _KSEMAPHORE {
+    DISPATCHER_HEADER Header;
+    LONG              Limit;
+} KSEMAPHORE, *PKSEMAPHORE;
+
+typedef struct _KMUTANT {
+    DISPATCHER_HEADER Header;
+} KMUTANT, *PKMUTANT;
 
 /*
  * KTHREAD - a schedulable thread of execution. Each thread owns a kernel stack;
@@ -146,11 +190,18 @@ typedef struct _KTHREAD {
 
     /* User-mode threads start life in ring 3 at UserEntry with stack UserStack
      * instead of calling a kernel StartRoutine. UserGsBase is the TEB address
-     * the GS segment resolves to while the thread runs in ring 3. */
+     * the GS segment resolves to while the thread runs in ring 3. UserArg is
+     * passed to the entry point in RCX (Windows convention). */
     BOOLEAN         UserMode;
     UINT64          UserEntry;
     UINT64          UserStack;
     UINT64          UserGsBase;
+    UINT64          UserArg;
+
+    /* Synchronization: the block used while this thread waits, and the
+     * dispatcher header (if any) that is signaled when it terminates. */
+    KWAIT_BLOCK        WaitBlock;
+    PDISPATCHER_HEADER TerminationObject;
 } KTHREAD, *PKTHREAD;
 
 /*
@@ -169,7 +220,7 @@ PKTHREAD  KeCreateThread(const char *name, PKSTART_ROUTINE routine,
                          PVOID context, LONG priority);
 PKTHREAD  KeCreateUserThread(const char *name, UINT64 user_entry,
                             UINT64 user_stack, UINT64 user_gs_base,
-                            LONG priority);
+                            UINT64 user_arg, LONG priority);
 PKTHREAD  KeGetCurrentThread(void);
 void      KeYield(void);
 NORETURN void KeTerminateThread(void);
@@ -177,6 +228,30 @@ NORETURN void KeTerminateThread(void);
 /* Called from the timer interrupt to drive preemption. */
 void      KeClockTick(void);
 UINT64    KeGetTickCount(void);
+
+/* Scheduler hooks used by the dispatcher (interrupts must be disabled). */
+void      KiReadyThread(PKTHREAD thread);   /* move a waiting thread to Ready */
+void      KiBlockCurrentThread(void);       /* current is Waiting -> reschedule */
+
+/* ------------------------------------------------------------------ */
+/* Synchronization primitives                                          */
+/* ------------------------------------------------------------------ */
+
+void KeInitializeEvent(PKEVENT event, BOOLEAN notification, BOOLEAN signaled);
+LONG KeSetEvent(PKEVENT event);   /* returns the previous state */
+void KeResetEvent(PKEVENT event);
+
+void KeInitializeSemaphore(PKSEMAPHORE sem, LONG initial, LONG limit);
+LONG KeReleaseSemaphore(PKSEMAPHORE sem, LONG count);
+
+void KeInitializeMutant(PKMUTANT mutant, BOOLEAN initially_owned);
+LONG KeReleaseMutant(PKMUTANT mutant);
+
+/* Block until `object` (a DISPATCHER_HEADER) is signaled and acquired. */
+NTSTATUS KeWaitForSingleObject(PDISPATCHER_HEADER object);
+
+/* Signal a header and wake its waiters (interrupts must be disabled). */
+void KiSignalObject(PDISPATCHER_HEADER header);
 
 /* ------------------------------------------------------------------ */
 /* System calls and user mode (ring 3)                                */
@@ -198,8 +273,8 @@ void KeSetUserGsBase(UINT64 teb);
 /* Set the TSS ring-0 stack pointer (implemented in gdt.c). */
 void KeSetTssRsp0(UINT64 rsp0);
 
-/* Assembly: drop to ring 3 at `entry` with stack `user_stack` (never returns). */
-void KiEnterUserMode(UINT64 entry, UINT64 user_stack);
+/* Assembly: drop to ring 3 at `entry` (arg in RCX) with `user_stack`. */
+void KiEnterUserMode(UINT64 entry, UINT64 user_stack, UINT64 arg);
 
 /* The C half of the system-service dispatcher, called from KiSystemCallEntry. */
 UINT64 KiSystemServiceDispatch(UINT64 number, UINT64 a1, UINT64 a2, UINT64 a3,

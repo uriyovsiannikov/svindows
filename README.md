@@ -57,6 +57,11 @@ The kernel currently:
   in the object namespace back `NtCreateFile` / `NtReadFile` / `NtWriteFile` /
   `NtClose`. The test program opens the console and a file, reads the file, and
   echoes it to the console entirely through NT handles.
+- **User-mode multithreading**: waitable dispatcher objects (events, semaphores,
+  mutants; threads signal on exit) with `KeWaitForSingleObject`, exposed as
+  `NtCreateThread` / `NtCreateEvent` / `NtSetEvent` / `NtWaitForSingleObject`.
+  The test program spawns a worker thread, waits on an event the worker signals,
+  and then joins the worker's thread handle — all from ring 3.
 
 See [`docs/ROADMAP.md`](docs/ROADMAP.md) for what comes next (physical/virtual
 memory manager, object manager, threads & scheduler, system-call boundary, and

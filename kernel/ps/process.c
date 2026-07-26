@@ -11,9 +11,10 @@
 #include <ntos/rtl.h>
 #include <nt/peb.h>
 
-/* Fixed user addresses for the single process we currently support. */
-#define USER_PEB_VA 0x0000000000061000ULL
-#define USER_TEB_VA 0x0000000000060000ULL
+/* Fixed user addresses for the single process we currently support (shared with
+ * ps.h so additional threads can find the PEB). */
+#define USER_PEB_VA PROCESS_PEB_VA
+#define USER_TEB_VA PROCESS_MAIN_TEB_VA
 
 static void *map_user_rw(UINT64 va)
 {
@@ -45,5 +46,5 @@ PKTHREAD PsCreateUserProcess(const char *name, UINT64 entry, UINT64 image_base,
     KeLog("[ps]   process '%s': PEB @ %p (ImageBase %p), TEB @ %p\n",
           name, (void *)USER_PEB_VA, (void *)image_base, (void *)USER_TEB_VA);
 
-    return KeCreateUserThread(name, entry, stack_top, USER_TEB_VA, 8);
+    return KeCreateUserThread(name, entry, stack_top, USER_TEB_VA, 0, 8);
 }

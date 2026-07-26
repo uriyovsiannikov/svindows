@@ -8,3 +8,7 @@ EXPORTS
     NtReadFile
     NtWriteFile
     NtClose
+    NtCreateEvent
+    NtSetEvent
+    NtWaitForSingleObject
+    NtCreateThread

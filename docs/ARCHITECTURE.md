@@ -65,6 +65,17 @@ every context switch, so the model stays correct across preemption between user
 and kernel threads. `Ps` (`ps/process.c`) builds the PEB and TEB and launches
 the main thread via `PsCreateUserProcess`.
 
+## Synchronization
+
+Waitable kernel objects — events, semaphores, mutants, and threads — begin their
+body with a `DISPATCHER_HEADER` (a signal state plus a wait list). A thread that
+cannot immediately acquire an object links its wait block into that list, marks
+itself `Waiting`, and reschedules; a signal wakes every waiter to re-test the
+object. Because a syscall can block this way, the user `RSP` is saved on the
+per-thread kernel stack (not the shared per-CPU slot) so it survives a context
+switch to another thread mid-syscall. `NtCreateThread`, `NtCreateEvent`,
+`NtSetEvent`, and `NtWaitForSingleObject` expose this to ring 3.
+
 ## Loading executables
 
 `Ldr` (`ldr/pe.c`) loads PE32+ images the way Windows does: it maps the image at

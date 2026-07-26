@@ -1,80 +1,93 @@
 ; ============================================================================
-; user/testapp.asm - a native NTOS test program exercising handle-based file I/O.
+; user/testapp.asm - a native NTOS test program demonstrating multithreading.
 ;
-; Opens the console and a file on the FAT disk through NtCreateFile, reads the
-; file with NtReadFile, echoes its contents to the console with NtWriteFile, and
-; closes both handles - the same object/handle model Windows uses.
+; The main thread creates an auto-reset event and a worker thread (passing the
+; event handle as the argument), then waits on the event. The worker runs, sets
+; the event to wake main, and exits. Main then waits on the worker's thread
+; handle (signaled on exit) before finishing - the classic create/signal/join.
 ;
-; Windows x64 calling convention: args in RCX, RDX, R8, R9; RAX returns; callers
-; reserve 32 bytes of shadow space. RBX/R12-R15 are non-volatile, so handles and
-; buffers kept there survive the syscalls.
+; Windows x64 ABI: args in RCX/RDX/R8/R9; RAX returns; 32-byte shadow space;
+; RBX/R12-R15 are non-volatile, so handles kept there survive the syscalls.
 ; ============================================================================
 bits 64
 default rel
 
-extern NtCreateFile
-extern NtReadFile
-extern NtWriteFile
-extern NtClose
-extern NtAllocateVirtualMemory
+extern NtCreateEvent
+extern NtSetEvent
+extern NtWaitForSingleObject
+extern NtCreateThread
+extern NtDisplayString
 extern NtTerminateThread
 
 section .text
 global Start
+
+; ---- main thread ----------------------------------------------------------
 Start:
     and     rsp, -16
-    sub     rsp, 32               ; shadow space, 16-aligned
+    sub     rsp, 32
 
-    ; console = NtCreateFile("\Device\Console")
-    lea     rcx, [console_name]
-    call    NtCreateFile
-    mov     rbx, rax              ; rbx = console handle
+    xor     ecx, ecx              ; notification = 0 (auto-reset event)
+    xor     edx, edx              ; initial state = 0 (not signaled)
+    call    NtCreateEvent
+    mov     rbx, rax              ; rbx = event handle
 
-    ; NtWriteFile(console, greeting, greeting_len)
-    mov     rcx, rbx
-    lea     rdx, [greeting]
-    mov     r8d, greeting_len
-    call    NtWriteFile
+    lea     rcx, [msg_created]
+    call    NtDisplayString
 
-    ; buffer = NtAllocateVirtualMemory(512)
-    mov     ecx, 512
-    call    NtAllocateVirtualMemory
-    mov     r13, rax              ; r13 = read buffer
+    lea     rcx, [WorkerEntry]    ; thread = NtCreateThread(WorkerEntry, event)
+    mov     rdx, rbx              ; argument = event handle
+    call    NtCreateThread
+    mov     r12, rax              ; r12 = worker thread handle
 
-    ; file = NtCreateFile("message.txt")
-    lea     rcx, [file_name]
-    call    NtCreateFile
-    mov     r12, rax              ; r12 = file handle
+    lea     rcx, [msg_waiting]
+    call    NtDisplayString
 
-    ; bytes = NtReadFile(file, buffer, 512)
-    mov     rcx, r12
-    mov     rdx, r13
-    mov     r8d, 512
-    call    NtReadFile
-    mov     r14, rax              ; r14 = bytes read
+    mov     rcx, rbx              ; wait for the worker to signal the event
+    call    NtWaitForSingleObject
 
-    ; NtWriteFile(console, buffer, bytes) - echo the file to the console
-    mov     rcx, rbx
-    mov     rdx, r13
-    mov     r8, r14
-    call    NtWriteFile
+    lea     rcx, [msg_woke]
+    call    NtDisplayString
 
-    ; close both handles
-    mov     rcx, r12
-    call    NtClose
-    mov     rcx, rbx
-    call    NtClose
+    mov     rcx, r12              ; join: wait for the worker thread to exit
+    call    NtWaitForSingleObject
 
-    call    NtTerminateThread     ; does not return
+    lea     rcx, [msg_joined]
+    call    NtDisplayString
 
-.hang:
-    jmp     .hang
+    call    NtTerminateThread
+.hang_main:
+    jmp     .hang_main
+
+; ---- worker thread (RCX = event handle) -----------------------------------
+WorkerEntry:
+    and     rsp, -16
+    sub     rsp, 32
+    mov     rbx, rcx              ; rbx = event handle
+
+    lea     rcx, [msg_worker_run]
+    call    NtDisplayString
+
+    mov     r13, 0                ; burn some cycles so the interleaving shows
+.work:
+    inc     r13
+    cmp     r13, 6000000
+    jb      .work
+
+    mov     rcx, rbx              ; signal the event -> wakes main
+    call    NtSetEvent
+
+    lea     rcx, [msg_worker_set]
+    call    NtDisplayString
+
+    call    NtTerminateThread
+.hang_worker:
+    jmp     .hang_worker
 
 section .rdata
-console_name:
-    db "\Device\Console", 0
-file_name:
-    db "message.txt", 0
-greeting:
-    db "testapp.exe: reading a file through NT handles ->", 10
-greeting_len equ $ - greeting
+msg_created:    db "main: created an event and a worker thread", 0
+msg_waiting:    db "main: waiting for the worker to signal the event...", 0
+msg_woke:       db "main: woke up - the worker signaled the event", 0
+msg_joined:     db "main: worker thread has exited; joining complete", 0
+msg_worker_run: db "  worker: running, about to signal the event", 0
+msg_worker_set: db "  worker: signaled the event, now exiting", 0

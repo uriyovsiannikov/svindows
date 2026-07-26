@@ -44,8 +44,12 @@ the kernel allocates from.
 - [x] Preemptive scheduler driven by the 8254 PIT via the remapped 8259 PIC;
       round-robin with per-thread quanta, `KeCreateThread` / `KeYield` /
       `KeTerminateThread`.
+- [x] Thread synchronization: dispatcher (waitable) objects with a
+      DISPATCHER_HEADER, thread blocking/waking, and `KeWaitForSingleObject`.
+      Events (notification + auto-reset), semaphores, and mutants share the
+      wait/wake machinery; threads are waitable and signal on exit.
 - [ ] Priority-based ordering (the `Priority` field exists but scheduling is
-      currently round-robin) and thread synchronization/wait.
+      currently round-robin); `KeWaitForMultipleObjects` and wait timeouts.
 - [ ] `ETHREAD` / `EPROCESS` executive wrappers and a terminated-thread reaper.
 - [ ] Kernel-mode threads work today; the user/kernel privilege split is Phase 4.
 
@@ -70,8 +74,11 @@ the kernel allocates from.
 - [ ] APIC + IOAPIC bring-up; keyboard interrupt (still on the 8259 PIC / PIT).
 - [ ] Capture/validate user-mode pointers (SEH-style probing) instead of
       trusting them.
+- [x] `NtCreateThread` (spawn a ring-3 thread in the current process, waitable
+      on exit) and `NtCreateEvent` / `NtSetEvent` / `NtWaitForSingleObject`
+      (wait on an event or a thread handle) — user-mode multithreading.
 - [ ] Match the real Windows `Nt*` numbers/signatures and grow the set
-      (`NtCreateFile`, `NtWriteFile`, `NtCreateThread`, ...).
+      (`NtCreateFile`, `NtWriteFile`, ... with proper parameter blocks).
 
 ## Phase 5 — I/O manager (`Io`) (in progress)
 

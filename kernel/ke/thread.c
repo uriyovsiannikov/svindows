@@ -18,8 +18,8 @@
 #define THREAD_STACK_SIZE 0x4000 /* 16 KiB kernel stack per thread */
 
 extern void KiSwitchContext(UINT64 *save_rsp, UINT64 load_rsp);
-extern void KiThreadStartup(void);                       /* asm trampoline   */
-extern void KiEnterUserMode(UINT64 entry, UINT64 stack); /* asm ring-3 switch */
+extern void KiThreadStartup(void);                              /* asm trampoline    */
+extern void KiEnterUserMode(UINT64 entry, UINT64 stack, UINT64 arg); /* asm ring-3 */
 
 static KPROCESS       g_system_process;
 static KTHREAD        g_idle_thread;
@@ -118,7 +118,7 @@ PKTHREAD KeCreateThread(const char *name, PKSTART_ROUTINE routine,
 
 PKTHREAD KeCreateUserThread(const char *name, UINT64 user_entry,
                             UINT64 user_stack, UINT64 user_gs_base,
-                            LONG priority)
+                            UINT64 user_arg, LONG priority)
 {
     PKTHREAD t = KepAllocThread(name, priority);
     if (!t)
@@ -128,6 +128,7 @@ PKTHREAD KeCreateUserThread(const char *name, UINT64 user_entry,
     t->UserEntry = user_entry;
     t->UserStack = user_stack;
     t->UserGsBase = user_gs_base;
+    t->UserArg = user_arg;
     KepEnqueueThread(t);
 
     KeLog("[ke]   created user thread '%s' (id %u): entry %p, ustack %p, teb %p\n",
@@ -186,6 +187,22 @@ void KeYield(void)
     KiIrqRestore(flags);
 }
 
+/* Move a waiting thread back to the ready queue (called by the dispatcher with
+ * interrupts disabled). */
+void KiReadyThread(PKTHREAD thread)
+{
+    if (thread->State == ThreadStateWaiting) {
+        thread->State = ThreadStateReady;
+        InsertTailList(&g_ready_queue, &thread->ReadyEntry);
+    }
+}
+
+/* The current thread has marked itself Waiting; switch away until readied. */
+void KiBlockCurrentThread(void)
+{
+    KiSchedule(); /* won't re-enqueue a non-Running thread */
+}
+
 /* Entered from KiThreadStartup (assembly) the first time a new thread runs. */
 void KiThreadBootstrap(void)
 {
@@ -194,7 +211,7 @@ void KiThreadBootstrap(void)
     if (t->UserMode) {
         /* Drop to ring 3; the thread lives in user mode from here and only
          * re-enters the kernel via syscalls and interrupts. Never returns. */
-        KiEnterUserMode(t->UserEntry, t->UserStack);
+        KiEnterUserMode(t->UserEntry, t->UserStack, t->UserArg);
     } else if (t->StartRoutine) {
         t->StartRoutine(t->StartContext);
     }
@@ -209,6 +226,12 @@ NORETURN void KeTerminateThread(void)
     PKTHREAD t = g_current_thread;
     t->State = ThreadStateTerminated;
     KeLog("[ke]   thread '%s' (id %u) terminated\n", t->Name, t->ThreadId);
+
+    /* Signal the thread object so anyone waiting on this thread wakes up. */
+    if (t->TerminationObject) {
+        t->TerminationObject->SignalState = 1;
+        KiSignalObject(t->TerminationObject);
+    }
 
     /* NOTE: the thread's stack and KTHREAD are intentionally leaked for now;
      * a reaper in the idle thread will reclaim terminated threads once there

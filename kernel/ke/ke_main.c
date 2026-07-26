@@ -182,9 +182,10 @@ void KiSystemStartup(UINT32 magic, UINT32 mbi_phys)
     KeLog("[test] after freeing all, in use %lu bytes\n",
           (unsigned long)ExPoolBytesInUse());
 
-    /* Phase 2: object manager. */
+    /* Phase 2: object manager, then the Ps object types. */
     ObInitialize();
     ObjectManagerDemo();
+    PsInitialize();
 
     /* Phase 5/6: mount the disk, then load a PE from it and run it. */
     KeLog("[io]   bringing up disk and filesystem...\n");

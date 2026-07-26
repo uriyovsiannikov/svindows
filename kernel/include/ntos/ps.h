@@ -23,4 +23,25 @@
 PKTHREAD PsCreateUserProcess(const char *name, UINT64 entry, UINT64 image_base,
                              UINT64 stack_base, UINT64 stack_top);
 
+/* The (single) user process's PEB virtual address, shared by its threads. */
+#define PROCESS_PEB_VA 0x0000000000061000ULL
+#define PROCESS_MAIN_TEB_VA 0x0000000000060000ULL
+
+/* Register the Event and Thread object types. Requires Ob. */
+void PsInitialize(void);
+
+/*
+ * Handle-based synchronization + thread services (signatures match the syscall
+ * dispatcher: (a1, a2, a3, a4), result in the return value).
+ *
+ *   NtCreateEvent(notification, initial_state) -> HANDLE
+ *   NtSetEvent(handle)                         -> previous state
+ *   NtWaitForSingleObject(handle)              -> NTSTATUS
+ *   NtCreateThread(entry, arg)                 -> thread HANDLE
+ */
+UINT64 NtCreateEvent(UINT64 notification, UINT64 initial, UINT64 a3, UINT64 a4);
+UINT64 NtSetEvent(UINT64 handle, UINT64 a2, UINT64 a3, UINT64 a4);
+UINT64 NtWaitForSingleObject(UINT64 handle, UINT64 a2, UINT64 a3, UINT64 a4);
+UINT64 NtCreateThread(UINT64 entry, UINT64 arg, UINT64 a3, UINT64 a4);
+
 #endif /* _NTOS_PS_H_ */

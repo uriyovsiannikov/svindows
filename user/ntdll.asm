@@ -31,3 +31,7 @@ SYSCALL_STUB NtCreateFile,            4
 SYSCALL_STUB NtReadFile,              5
 SYSCALL_STUB NtWriteFile,             6
 SYSCALL_STUB NtClose,                 7
+SYSCALL_STUB NtCreateEvent,           8
+SYSCALL_STUB NtSetEvent,              9
+SYSCALL_STUB NtWaitForSingleObject,   10
+SYSCALL_STUB NtCreateThread,          11
