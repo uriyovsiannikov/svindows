@@ -50,6 +50,6 @@ void PsInitialize(void);
 UINT64 NtCreateEvent(UINT64 *args);
 UINT64 NtSetEvent(UINT64 *args);
 UINT64 NtWaitForSingleObject(UINT64 *args);
-UINT64 NtCreateThread(UINT64 *args);
+UINT64 NtCreateThreadEx(UINT64 *args);
 
 #endif /* _NTOS_PS_H_ */

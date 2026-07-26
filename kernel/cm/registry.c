@@ -15,7 +15,9 @@
 #include <ntos/ob.h>
 #include <ntos/ex.h>
 #include <ntos/ke.h>
+#include <ntos/mm.h>
 #include <ntos/rtl.h>
+#include <nt/ntobject.h>
 
 typedef struct _CM_VALUE {
     LIST_ENTRY Link;
@@ -210,72 +212,134 @@ static CM_KEY *cm_key_from_handle(UINT64 handle)
 /* Nt* services                                                       */
 /* ------------------------------------------------------------------ */
 
-/* NtCreateKey(parent_handle, name) - simplified (no OBJECT_ATTRIBUTES yet). */
+/* Resolve OBJECT_ATTRIBUTES (RootDirectory + captured name) to a target key.
+ * Returns STATUS on failure; on success writes *out. */
+static NTSTATUS cm_resolve_oa(POBJECT_ATTRIBUTES oa, BOOLEAN create,
+                              CM_KEY **out)
+{
+    if (!MmProbeForRead((UINT64)oa, sizeof(OBJECT_ATTRIBUTES)))
+        return STATUS_ACCESS_VIOLATION;
+
+    /* RootDirectory (a key handle) anchors a relative name; NULL means the
+     * name is absolute from the registry root. */
+    CM_KEY *parent = cm_key_from_handle((UINT64)oa->RootDirectory);
+    if (!parent)
+        return STATUS_INVALID_HANDLE;
+
+    char name[128];
+    if (!MmCaptureUnicodeName((UINT64)oa->ObjectName, name, sizeof(name)))
+        return STATUS_ACCESS_VIOLATION;
+
+    CM_KEY *k = cm_walk(parent, name, create);
+    if (!k)
+        return create ? STATUS_NO_MEMORY : STATUS_OBJECT_NAME_NOT_FOUND;
+    *out = k;
+    return STATUS_SUCCESS;
+}
+
+/* NtCreateKey(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES, TitleIndex, Class,
+ *             CreateOptions, PULONG Disposition). */
 UINT64 NtCreateKey(UINT64 *a)
 {
-    UINT64 parent_handle = a[0], name_ptr = a[1];
-    CM_KEY *parent = cm_key_from_handle(parent_handle);
-    if (!parent || name_ptr == 0)
-        return 0;
-    CM_KEY *k = cm_walk(parent, (const char *)name_ptr, TRUE);
-    if (!k)
-        return 0;
+    PHANDLE out_handle = (PHANDLE)a[0];
+    UINT32 *disp = (UINT32 *)a[6];
+    if (!MmProbeForWrite((UINT64)out_handle, sizeof(HANDLE)))
+        return (UINT64)STATUS_ACCESS_VIOLATION;
+
+    CM_KEY *k;
+    NTSTATUS st = cm_resolve_oa((POBJECT_ATTRIBUTES)a[2], TRUE, &k);
+    if (!NT_SUCCESS(st))
+        return (UINT64)st;
+
     UINT64 h = cm_make_handle(k);
-    KeLog("[cm]   NtCreateKey('%s') -> handle %p\n", (const char *)name_ptr,
-          (void *)h);
-    return h;
+    *out_handle = (HANDLE)(ULONG_PTR)h;
+    if (disp && MmProbeForWrite((UINT64)disp, sizeof(UINT32)))
+        *disp = 1; /* REG_CREATED_NEW_KEY (we don't distinguish) */
+    KeLog("[cm]   NtCreateKey -> handle %p\n", (void *)h);
+    return (UINT64)STATUS_SUCCESS;
 }
 
+/* NtOpenKey(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES). */
 UINT64 NtOpenKey(UINT64 *a)
 {
-    UINT64 parent_handle = a[0], name_ptr = a[1];
-    CM_KEY *parent = cm_key_from_handle(parent_handle);
-    if (!parent || name_ptr == 0)
-        return 0;
-    CM_KEY *k = cm_walk(parent, (const char *)name_ptr, FALSE);
-    if (!k) {
-        KeLog("[cm]   NtOpenKey('%s') -> not found\n", (const char *)name_ptr);
-        return 0;
-    }
+    PHANDLE out_handle = (PHANDLE)a[0];
+    if (!MmProbeForWrite((UINT64)out_handle, sizeof(HANDLE)))
+        return (UINT64)STATUS_ACCESS_VIOLATION;
+
+    CM_KEY *k;
+    NTSTATUS st = cm_resolve_oa((POBJECT_ATTRIBUTES)a[2], FALSE, &k);
+    if (!NT_SUCCESS(st))
+        return (UINT64)st;
+
     UINT64 h = cm_make_handle(k);
-    KeLog("[cm]   NtOpenKey('%s') -> handle %p\n", (const char *)name_ptr,
-          (void *)h);
-    return h;
+    *out_handle = (HANDLE)(ULONG_PTR)h;
+    KeLog("[cm]   NtOpenKey -> handle %p\n", (void *)h);
+    return (UINT64)STATUS_SUCCESS;
 }
 
+/* NtSetValueKey(HANDLE, PUNICODE_STRING ValueName, TitleIndex, Type, Data,
+ *               DataSize). */
 UINT64 NtSetValueKey(UINT64 *a)
 {
-    UINT64 handle = a[0], param_ptr = a[1];
-    CM_KEY *k = cm_key_from_handle(handle);
-    if (!k || param_ptr == 0)
+    CM_KEY *k = cm_key_from_handle(a[0]);
+    if (!k)
         return (UINT64)STATUS_INVALID_HANDLE;
-    CM_SET_VALUE *p = (CM_SET_VALUE *)param_ptr;
-    NTSTATUS st = cm_set_value(k, p->Name, p->Type, p->Data, p->Size);
+
+    char vname[64];
+    if (!MmCaptureUnicodeName(a[1], vname, sizeof(vname)))
+        return (UINT64)STATUS_ACCESS_VIOLATION;
+
+    UINT32 type = (UINT32)a[3];
+    UINT64 data = a[4];
+    UINT32 size = (UINT32)a[5];
+    if (size && !MmProbeForRead(data, size))
+        return (UINT64)STATUS_ACCESS_VIOLATION;
+
+    NTSTATUS st = cm_set_value(k, vname, type, (const void *)data, size);
     KeLog("[cm]   NtSetValueKey('%s', type=%u, %u bytes) -> 0x%08x\n",
-          p->Name, (unsigned)p->Type, (unsigned)p->Size, (unsigned)st);
+          vname, (unsigned)type, (unsigned)size, (unsigned)st);
     return (UINT64)st;
 }
 
+/* NtQueryValueKey(HANDLE, PUNICODE_STRING ValueName, InfoClass, Info, Length,
+ *                 PULONG ResultLength) - returns KEY_VALUE_PARTIAL_INFORMATION. */
 UINT64 NtQueryValueKey(UINT64 *a)
 {
-    UINT64 handle = a[0], param_ptr = a[1];
-    CM_KEY *k = cm_key_from_handle(handle);
-    if (!k || param_ptr == 0)
+    CM_KEY *k = cm_key_from_handle(a[0]);
+    if (!k)
         return (UINT64)STATUS_INVALID_HANDLE;
-    CM_QUERY_VALUE *p = (CM_QUERY_VALUE *)param_ptr;
 
-    CM_VALUE *v = cm_find_value(k, p->Name);
+    char vname[64];
+    if (!MmCaptureUnicodeName(a[1], vname, sizeof(vname)))
+        return (UINT64)STATUS_ACCESS_VIOLATION;
+
+    UINT64 info = a[3];
+    UINT32 length = (UINT32)a[4];
+    UINT32 *result_len = (UINT32 *)a[5];
+
+    CM_VALUE *v = cm_find_value(k, vname);
     if (!v)
         return (UINT64)STATUS_OBJECT_NAME_NOT_FOUND;
 
-    if (p->Type)
-        *p->Type = v->Type;
-    if (p->Data && p->Size) {
-        UINT32 copy = (*p->Size < v->Size) ? *p->Size : v->Size;
-        memcpy(p->Data, v->Data, copy);
+    UINT32 needed = (UINT32)(sizeof(KEY_VALUE_PARTIAL_INFORMATION) - 1 + v->Size);
+    if (result_len && MmProbeForWrite((UINT64)result_len, sizeof(UINT32)))
+        *result_len = needed;
+
+    if (info == 0 || length < needed) {
+        if (!info || length < sizeof(KEY_VALUE_PARTIAL_INFORMATION) - 1)
+            return (UINT64)STATUS_BUFFER_TOO_SMALL;
     }
-    if (p->Size)
-        *p->Size = v->Size;
+    if (!MmProbeForWrite(info, length))
+        return (UINT64)STATUS_ACCESS_VIOLATION;
+
+    KEY_VALUE_PARTIAL_INFORMATION *kvpi = (KEY_VALUE_PARTIAL_INFORMATION *)info;
+    kvpi->TitleIndex = 0;
+    kvpi->Type = v->Type;
+    kvpi->DataLength = v->Size;
+    UINT32 avail = length - (UINT32)(sizeof(KEY_VALUE_PARTIAL_INFORMATION) - 1);
+    UINT32 copy = (avail < v->Size) ? avail : v->Size;
+    memcpy(kvpi->Data, v->Data, copy);
+
     return (UINT64)STATUS_SUCCESS;
 }
 

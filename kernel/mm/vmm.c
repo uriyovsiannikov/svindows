@@ -171,3 +171,58 @@ UINT64 MmGetPhysicalAddress(UINT64 virt)
         return MM_INVALID_PHYS;
     return (pte & PTE_ADDR_MASK) | (virt & PAGE_MASK);
 }
+
+/* ------------------------------------------------------------------ */
+/* User-pointer validation                                            */
+/* ------------------------------------------------------------------ */
+
+BOOLEAN MmIsUserAddress(UINT64 va)
+{
+    return (BOOLEAN)(va < MM_USER_MAX);
+}
+
+BOOLEAN MmProbeForRead(UINT64 va, UINT64 len)
+{
+    if (len == 0)
+        return TRUE;
+    if (va + len < va)                 /* wrap-around */
+        return FALSE;
+    if (!MmIsUserAddress(va) || !MmIsUserAddress(va + len - 1))
+        return FALSE;
+    for (UINT64 p = PAGE_ALIGN(va); p < va + len; p += PAGE_SIZE)
+        if (MmGetPhysicalAddress(p) == MM_INVALID_PHYS)
+            return FALSE;
+    return TRUE;
+}
+
+BOOLEAN MmProbeForWrite(UINT64 va, UINT64 len)
+{
+    /* Same presence + range check; per-page write permission isn't tracked
+     * separately here, and user data pages are mapped writable. */
+    return MmProbeForRead(va, len);
+}
+
+BOOLEAN MmCaptureUnicodeName(UINT64 ustr_va, char *out, SIZE_T out_size)
+{
+    out[0] = 0;
+    if (out_size == 0)
+        return FALSE;
+    if (!MmProbeForRead(ustr_va, 16)) /* UNICODE_STRING is 16 bytes on x64 */
+        return FALSE;
+
+    UINT16 length = *(volatile UINT16 *)ustr_va;        /* bytes  */
+    UINT64 buffer = *(volatile UINT64 *)(ustr_va + 8);  /* PWSTR  */
+    UINT32 chars = length / 2;
+    if (chars >= out_size)
+        chars = (UINT32)out_size - 1;
+    if (chars && !MmProbeForRead(buffer, (UINT64)chars * 2))
+        return FALSE;
+
+    UINT32 i = 0;
+    for (; i < chars; i++) {
+        UINT16 c = ((volatile UINT16 *)buffer)[i];
+        out[i] = (c && c < 0x80) ? (char)c : '?';
+    }
+    out[i] = 0;
+    return TRUE;
+}

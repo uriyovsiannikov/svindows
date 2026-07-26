@@ -11,7 +11,7 @@ EXPORTS
     NtCreateEvent
     NtSetEvent
     NtWaitForSingleObject
-    NtCreateThread
+    NtCreateThreadEx
     NtLoadLibrary
     NtCreateKey
     NtOpenKey

@@ -221,7 +221,7 @@ static KI_SERVICE KiServiceTable[NTOS_MAX_SYSCALL];
 #define SN_NtCreateKey             0x1A
 #define SN_NtSetEvent              0x02
 #define SN_NtCreateEvent           0x48
-#define SN_NtCreateThread          0x4B
+#define SN_NtCreateThreadEx        0xA5
 #define SN_NtCreateFile            0x52
 #define SN_NtSetValueKey           0x5D
 #define SN_NtTerminateThread       0x50
@@ -243,7 +243,7 @@ void KiInitializeServiceTable(void)
     KiServiceTable[SN_NtCreateKey]             = NtCreateKey;
     KiServiceTable[SN_NtSetEvent]              = NtSetEvent;
     KiServiceTable[SN_NtCreateEvent]           = NtCreateEvent;
-    KiServiceTable[SN_NtCreateThread]          = NtCreateThread;
+    KiServiceTable[SN_NtCreateThreadEx]        = NtCreateThreadEx;
     KiServiceTable[SN_NtCreateFile]            = NtCreateFile;
     KiServiceTable[SN_NtSetValueKey]           = NtSetValueKey;
     KiServiceTable[SN_NtTerminateThread]       = NtTerminateThread;

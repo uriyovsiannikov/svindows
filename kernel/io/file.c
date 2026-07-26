@@ -15,6 +15,7 @@
 #include <ntos/ob.h>
 #include <ntos/ex.h>
 #include <ntos/ke.h>
+#include <ntos/mm.h>
 #include <ntos/hal.h>
 #include <ntos/rtl.h>
 #include <nt/ntobject.h>
@@ -66,19 +67,6 @@ void IoInitializeObjects(void)
     KeLog("[io]   \\Device\\Console ready; File object type registered\n");
 }
 
-/* Flatten a UNICODE_STRING (UTF-16) object name into an ASCII buffer. Names are
- * plain ASCII in practice; non-ASCII code units are dropped to '?'. */
-static void unicode_to_ascii(PUNICODE_STRING u, char *out, SIZE_T out_size)
-{
-    SIZE_T n = u ? (u->Length / 2) : 0;
-    SIZE_T i = 0;
-    for (; i < n && i < out_size - 1; i++) {
-        UINT16 c = u->Buffer[i];
-        out[i] = (c && c < 0x80) ? (char)c : '?';
-    }
-    out[i] = '\0';
-}
-
 /*
  * NtCreateFile with the real Windows signature (through the argument array):
  *   a0 PHANDLE FileHandle (out)   a1 ACCESS_MASK DesiredAccess
@@ -86,6 +74,7 @@ static void unicode_to_ascii(PUNICODE_STRING u, char *out, SIZE_T out_size)
  *   a4 PLARGE_INTEGER Alloc       a5 ULONG FileAttributes
  *   a6 ULONG ShareAccess          a7 ULONG CreateDisposition
  *   a8 ULONG CreateOptions        a9 PVOID EaBuffer   a10 ULONG EaLength
+ * User pointers are validated (and the name captured) before use.
  */
 UINT64 NtCreateFile(UINT64 *a)
 {
@@ -93,8 +82,14 @@ UINT64 NtCreateFile(UINT64 *a)
     POBJECT_ATTRIBUTES oa         = (POBJECT_ATTRIBUTES)a[2];
     PIO_STATUS_BLOCK   iosb       = (PIO_STATUS_BLOCK)a[3];
 
+    if (!MmProbeForWrite((UINT64)out_handle, sizeof(HANDLE)) ||
+        !MmProbeForWrite((UINT64)iosb, sizeof(IO_STATUS_BLOCK)) ||
+        !MmProbeForRead((UINT64)oa, sizeof(OBJECT_ATTRIBUTES)))
+        return (UINT64)STATUS_ACCESS_VIOLATION;
+
     char name[128];
-    unicode_to_ascii(oa ? oa->ObjectName : NULL, name, sizeof(name));
+    if (!MmCaptureUnicodeName((UINT64)oa->ObjectName, name, sizeof(name)))
+        return (UINT64)STATUS_ACCESS_VIOLATION;
 
     HANDLE  h = NULL;
     NTSTATUS status = STATUS_UNSUCCESSFUL;
@@ -160,6 +155,10 @@ UINT64 NtReadFile(UINT64 *a)
     void            *buffer = (void *)a[5];
     UINT64           length = a[6];
 
+    if (!MmProbeForWrite((UINT64)iosb, sizeof(IO_STATUS_BLOCK)) ||
+        !MmProbeForWrite((UINT64)buffer, length))
+        return (UINT64)STATUS_ACCESS_VIOLATION;
+
     POBJECT obj;
     if (!NT_SUCCESS(ObReferenceObjectByHandle(handle, 0, g_file_type, &obj)))
         return (UINT64)STATUS_INVALID_HANDLE;
@@ -187,6 +186,10 @@ UINT64 NtWriteFile(UINT64 *a)
     PIO_STATUS_BLOCK iosb   = (PIO_STATUS_BLOCK)a[4];
     const void      *buffer = (const void *)a[5];
     UINT64           length = a[6];
+
+    if (!MmProbeForWrite((UINT64)iosb, sizeof(IO_STATUS_BLOCK)) ||
+        !MmProbeForRead((UINT64)buffer, length))
+        return (UINT64)STATUS_ACCESS_VIOLATION;
 
     POBJECT obj;
     if (!NT_SUCCESS(ObReferenceObjectByHandle(handle, 0, g_file_type, &obj)))

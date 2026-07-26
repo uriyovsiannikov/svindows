@@ -118,6 +118,28 @@ BOOLEAN MmMapPage(UINT64 virt, UINT64 phys, UINT64 flags);
 BOOLEAN MmUnmapPage(UINT64 virt);
 UINT64  MmGetPhysicalAddress(UINT64 virt);   /* MM_INVALID_PHYS if not mapped */
 
+/* ------------------------------------------------------------------ */
+/* User-pointer validation                                            */
+/* ------------------------------------------------------------------ */
+
+/* User space is the low canonical half (below the non-canonical hole). */
+#define MM_USER_MAX 0x0000800000000000ULL
+
+/* TRUE if the whole range [va, va+len) lies in user space. */
+BOOLEAN MmIsUserAddress(UINT64 va);
+
+/* Validate that a user buffer is safe for the kernel to read / write: the whole
+ * range is in user space and every page is currently mapped. There is no kernel
+ * SEH yet, so this is a range + page-presence check (it catches null, kernel,
+ * and unmapped pointers) rather than a fault-safe probe. */
+BOOLEAN MmProbeForRead(UINT64 va, UINT64 len);
+BOOLEAN MmProbeForWrite(UINT64 va, UINT64 len);
+
+/* Probe and copy a user UNICODE_STRING's name (at `ustr_va`) into a kernel
+ * ASCII buffer, so the service works on a captured copy rather than a user
+ * pointer that could change or fault. FALSE if any pointer fails to probe. */
+BOOLEAN MmCaptureUnicodeName(UINT64 ustr_va, char *out, SIZE_T out_size);
+
 /* Top-level Mm bring-up: parse map, start PMM, install real paging. */
 void MmInitialize(UINT64 mb_info_phys);
 

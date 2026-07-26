@@ -120,6 +120,15 @@ The kernel currently:
   `malloc`/`free`, `strlen`/`strcpy`/`strcmp`, `memcpy`/`memset`, `puts`) layers
   a C runtime over the Win32 API, so a normal C program links against it instead
   of a host libc.
+- **Real signatures throughout, and validated user pointers.** The registry
+  (`NtOpenKey`/`NtCreateKey` via `OBJECT_ATTRIBUTES`, `NtQueryValueKey` returning
+  `KEY_VALUE_PARTIAL_INFORMATION`), threads (`NtCreateThreadEx`), and events/waits
+  now carry their true NT signatures, and advapi32/kernel32 build the structures
+  as the real DLLs do. The kernel no longer trusts ring-3 pointers blindly:
+  `MmProbeForRead`/`MmProbeForWrite` validate that a user buffer is in user space
+  with its pages present, and object names are **captured**
+  (`MmCaptureUnicodeName`) into kernel memory before use — so a bad pointer
+  returns `STATUS_ACCESS_VIOLATION` instead of faulting the kernel.
 
 See [`docs/ROADMAP.md`](docs/ROADMAP.md) for what comes next (physical/virtual
 memory manager, object manager, threads & scheduler, system-call boundary, and

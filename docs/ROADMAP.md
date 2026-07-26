@@ -143,10 +143,15 @@ the kernel allocates from.
       syscall; `Sleep` (`NtDelayExecution`); `GetCommandLineA` from
       `PEB->ProcessParameters`; `lstrlenA`/`lstrcpyA`/`lstrcatA`/`wsprintfA`; and
       an `msvcrt.dll` (`printf`/`malloc`/`free`/`str*`/`mem*`) over the Win32 API.
-- [ ] Extend real signatures to the rest (`NtOpenKey`/`NtCreateThreadEx`/...),
-      capture/probe user pointers, and grow the Win32 surface (`user32`/`gdi32`,
-      a fuller CRT, ...) so that *unmodified* Windows binaries can run — the
-      ReactOS/Wine-scale endgame.
+- [x] Extend real signatures to the rest and probe/capture user pointers:
+      `NtOpenKey`/`NtCreateKey` take `OBJECT_ATTRIBUTES`, `NtQueryValueKey`
+      returns `KEY_VALUE_PARTIAL_INFORMATION`, threads use `NtCreateThreadEx`,
+      and `NtWaitForSingleObject` takes alertable+timeout; the kernel validates
+      user buffers (`MmProbeForRead`/`MmProbeForWrite`) and captures object names
+      (`MmCaptureUnicodeName`) before use.
+- [ ] Grow the Win32 surface (`user32`/`gdi32` with a window/compositor stack, a
+      fuller CRT, ...) and add kernel SEH so probes are fault-safe, so that
+      *unmodified* Windows binaries can run — the ReactOS/Wine-scale endgame.
 
 ## Phase 7 — Graphics and the road to a desktop (in progress)
 

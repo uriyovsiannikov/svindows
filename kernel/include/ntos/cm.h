@@ -19,22 +19,17 @@
 #define REG_DWORD  4
 
 /*
- * Parameter blocks for the set/query services, passed by pointer (the syscall
- * path marshals only four arguments). advapi32 mirrors these layouts.
+ * KEY_VALUE_PARTIAL_INFORMATION - what NtQueryValueKey returns for info class
+ * KeyValuePartialInformation (2): the value's type, its size, and its bytes.
  */
-typedef struct _CM_SET_VALUE {
-    const char *Name;  /* value name (ASCII)          */
-    UINT32      Type;  /* REG_*                       */
-    UINT32      Size;  /* data size in bytes          */
-    const void *Data;  /* data to store               */
-} CM_SET_VALUE;
+#define KeyValuePartialInformation 2
 
-typedef struct _CM_QUERY_VALUE {
-    const char *Name;  /* value name to look up       */
-    UINT32     *Type;  /* out: REG_* (may be NULL)    */
-    UINT32     *Size;  /* in: buffer size; out: data size (may be NULL for size query) */
-    void       *Data;  /* out: buffer to fill (may be NULL) */
-} CM_QUERY_VALUE;
+typedef struct _KEY_VALUE_PARTIAL_INFORMATION {
+    UINT32 TitleIndex;
+    UINT32 Type;
+    UINT32 DataLength;
+    UINT8  Data[1];
+} KEY_VALUE_PARTIAL_INFORMATION;
 
 /* Bring up the registry: register the Key object type and build the initial
  * hive (\Registry\Machine\Software\NTOS with a couple of values). */

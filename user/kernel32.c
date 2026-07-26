@@ -69,8 +69,14 @@ extern NTSTATUS NtAllocateVirtualMemory(HANDLE Process, void **BaseAddress,
                                         ULONGLONG ZeroBits, ULONGLONG *RegionSize,
                                         DWORD AllocationType, DWORD Protect);
 extern long      NtClose(HANDLE h);
-extern HANDLE    NtCreateThread(LPVOID entry, LPVOID arg);
-extern long      NtWaitForSingleObject(HANDLE h);
+extern NTSTATUS  NtCreateThreadEx(HANDLE *ThreadHandle, DWORD DesiredAccess,
+                                  void *ObjectAttributes, HANDLE ProcessHandle,
+                                  void *StartRoutine, void *Argument,
+                                  DWORD CreateFlags, ULONGLONG ZeroBits,
+                                  ULONGLONG StackSize, ULONGLONG MaxStackSize,
+                                  void *AttributeList);
+extern NTSTATUS  NtWaitForSingleObject(HANDLE Handle, int Alertable,
+                                       long long *Timeout);
 extern void      NtTerminateThread(void);
 extern HANDLE    NtLoadLibrary(const char *name);
 extern NTSTATUS  NtDelayExecution(int Alertable, long long *Interval);
@@ -362,13 +368,17 @@ __declspec(dllexport) HANDLE CreateThread(LPVOID sa, ULONGLONG stack_size,
         return 0;
     info->Start = start;
     info->Param = param;
-    return NtCreateThread((LPVOID)BaseThreadStart, info);
+
+    HANDLE h = 0;
+    NtCreateThreadEx(&h, 0, 0, NT_INVALID_HANDLE, (void *)BaseThreadStart, info,
+                     0, 0, 0, 0, 0);
+    return h;
 }
 
 __declspec(dllexport) DWORD WaitForSingleObject(HANDLE h, DWORD ms)
 {
     (void)ms; /* timeouts not implemented; treat every wait as INFINITE */
-    NtWaitForSingleObject(h);
+    NtWaitForSingleObject(h, 0, 0);
     return WAIT_OBJECT_0;
 }
 

@@ -87,8 +87,19 @@ cannot immediately acquire an object links its wait block into that list, marks
 itself `Waiting`, and reschedules; a signal wakes every waiter to re-test the
 object. Because a syscall can block this way, the user `RSP` is saved on the
 per-thread kernel stack (not the shared per-CPU slot) so it survives a context
-switch to another thread mid-syscall. `NtCreateThread`, `NtCreateEvent`,
-`NtSetEvent`, and `NtWaitForSingleObject` expose this to ring 3.
+switch to another thread mid-syscall. `NtCreateThreadEx`, `NtCreateEvent`,
+`NtSetEvent`, and `NtWaitForSingleObject` (with alertable + timeout parameters)
+expose this to ring 3.
+
+**Validating user pointers.** A service must not trust the pointers ring 3 hands
+it. `MmProbeForRead`/`MmProbeForWrite` (`mm/vmm.c`) check that a buffer lies
+wholly in user space (`< 0x0000800000000000`) with every page present, and
+`MmCaptureUnicodeName` copies an object name out of a user `UNICODE_STRING` into
+kernel memory so the service works on a stable copy. `NtCreateFile`, the registry
+services, and the thread/event services probe their inputs and capture their
+names up front, returning `STATUS_ACCESS_VIOLATION` on a bad pointer rather than
+faulting the kernel. There is no kernel SEH yet, so these are range +
+page-presence checks, not fault-safe probes; adding SEH is future work.
 
 ## Loading executables
 
@@ -174,9 +185,11 @@ key/value store in memory: keys form a tree under an anonymous root whose child
 a list of named, typed values (`REG_SZ`, `REG_DWORD`, ...). Keys are handed to
 ring 3 as **`Key` objects** — `NtCreateKey`/`NtOpenKey` wrap the persistent
 tree node in an Ob object and return a handle, so `NtClose` releases a key like
-any other handle while the tree itself persists. `NtSetValueKey`/
-`NtQueryValueKey` take a small parameter block by pointer (the syscall path
-marshals only four registers). `advapi32.dll` layers the classic `Reg*` API on
+any other handle while the tree itself persists. The services carry their real
+NT signatures: `NtOpenKey`/`NtCreateKey` name the key through an
+`OBJECT_ATTRIBUTES` (whose `RootDirectory` anchors a relative name), and
+`NtQueryValueKey` returns a `KEY_VALUE_PARTIAL_INFORMATION`. `advapi32.dll`
+layers the classic `Reg*` API on
 top: predefined roots (`HKEY_LOCAL_MACHINE`, ...) map to absolute paths opened
 from the root, and a real key handle passes through as the parent for a relative
 open — so `app.exe → advapi32 → ntdll → syscall → Cm` is the full path a

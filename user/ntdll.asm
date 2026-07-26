@@ -36,7 +36,7 @@ SYSCALL_STUB NtAllocateVirtualMemory, 0x15
 SYSCALL_STUB NtQueryValueKey,         0x17
 SYSCALL_STUB NtCreateKey,             0x1A
 SYSCALL_STUB NtCreateEvent,           0x48
-SYSCALL_STUB NtCreateThread,          0x4B
+SYSCALL_STUB NtCreateThreadEx,        0xA5
 SYSCALL_STUB NtTerminateThread,       0x50
 SYSCALL_STUB NtDelayExecution,        0x31
 SYSCALL_STUB NtCreateFile,            0x52
