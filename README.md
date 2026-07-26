@@ -94,6 +94,14 @@ The kernel currently:
   them — the way a Windows program loads a plugin. **SSE** is enabled at boot
   (mandatory on x86-64 and for real Windows code), and the context switch
   preserves each thread's x87/SSE state with **FXSAVE/FXRSTOR**.
+- **Has a registry.** A Configuration Manager (`Cm`) keeps a hierarchical
+  key/value store in memory (rooted at `\Registry`, with keys exposed as `Key`
+  objects so `NtClose` releases them), reached through `NtCreateKey` /
+  `NtOpenKey` / `NtSetValueKey` / `NtQueryValueKey`. An **`advapi32.dll`**
+  implements the classic `RegOpenKeyExA` / `RegCreateKeyExA` / `RegSetValueExA` /
+  `RegQueryValueExA` / `RegCloseKey` on top; the test program reads a preset
+  value under `HKLM\Software\NTOS` and creates a key, writes a value, and reads
+  it back under `HKCU`.
 
 See [`docs/ROADMAP.md`](docs/ROADMAP.md) for what comes next (physical/virtual
 memory manager, object manager, threads & scheduler, system-call boundary, and
@@ -137,7 +145,8 @@ kernel/
   ldr/           Image loader (PE/COFF, imports/exports, loads from disk)
   ps/            Process manager (PEB/TEB, user process creation)
   io/            I/O manager (ATA PIO block driver, FAT32 filesystem)
-user/            User-space sources (ntdll.dll, kernel32.dll, extra.dll, testapp.exe)
+  cm/            Configuration Manager (the registry)
+user/            User-space sources (ntdll, kernel32, advapi32, extra, testapp)
 docs/            architecture notes and roadmap
 scripts/         helper scripts
 ```

@@ -47,6 +47,8 @@ NTDLL      := $(BUILD)/ntdll.dll
 NTDLLLIB   := $(BUILD)/ntdll.lib
 KERNEL32   := $(BUILD)/kernel32.dll
 KERNEL32LIB := $(BUILD)/kernel32.lib
+ADVAPI32   := $(BUILD)/advapi32.dll
+ADVAPI32LIB := $(BUILD)/advapi32.lib
 EXTRA      := $(BUILD)/extra.dll
 DISK       := $(BUILD)/disk.img
 LLDLINK    := lld-link
@@ -90,6 +92,15 @@ $(KERNEL32): user/kernel32.c $(NTDLL)
 	           $(BUILD)/kernel32.obj $(NTDLLLIB)
 	@echo "  DLL   $(KERNEL32)"
 
+# advapi32.dll: the registry Reg* API (C), built over ntdll's Nt*Key services.
+$(ADVAPI32): user/advapi32.c $(NTDLL)
+	@mkdir -p $(BUILD)
+	$(CLANGWIN) -c user/advapi32.c -o $(BUILD)/advapi32.obj
+	$(LLDLINK) /dll /noentry /machine:x64 /nodefaultlib /base:0x1D0000000 \
+	           /out:$(ADVAPI32) /implib:$(ADVAPI32LIB) \
+	           $(BUILD)/advapi32.obj $(NTDLLLIB)
+	@echo "  DLL   $(ADVAPI32)"
+
 # extra.dll: a standalone DLL loaded at runtime via LoadLibraryA (not linked
 # into the app's import chain). Distinct preferred base so it never collides.
 $(EXTRA): user/extra.c
@@ -99,23 +110,24 @@ $(EXTRA): user/extra.c
 	           /out:$(EXTRA) /implib:$(BUILD)/extra.lib $(BUILD)/extra.obj
 	@echo "  DLL   $(EXTRA)"
 
-# testapp.exe: a normal Win32 program (C), linked against kernel32.
-$(TESTAPP): user/testapp.c $(KERNEL32)
+# testapp.exe: a normal Win32 program (C), linked against kernel32 + advapi32.
+$(TESTAPP): user/testapp.c $(KERNEL32) $(ADVAPI32)
 	@mkdir -p $(BUILD)
 	$(CLANGWIN) -c user/testapp.c -o $(BUILD)/testapp.obj
 	$(LLDLINK) /subsystem:console /entry:Start /nodefaultlib /machine:x64 \
-	           /out:$@ $(BUILD)/testapp.obj $(KERNEL32LIB)
+	           /out:$@ $(BUILD)/testapp.obj $(KERNEL32LIB) $(ADVAPI32LIB)
 	@echo "  PE    $@"
 
 # FAT32 disk image holding the user-space executables, read by the kernel's
 # ATA + FAT drivers at runtime.
-$(DISK): $(TESTAPP) $(KERNEL32) $(NTDLL) $(EXTRA) user/message.txt
+$(DISK): $(TESTAPP) $(KERNEL32) $(NTDLL) $(ADVAPI32) $(EXTRA) user/message.txt
 	@mkdir -p $(BUILD)
 	dd if=/dev/zero of=$(DISK) bs=1M count=64 status=none
 	mformat -i $(DISK) -F -v NTOSDISK ::
 	mcopy -i $(DISK) $(TESTAPP) ::TESTAPP.EXE
 	mcopy -i $(DISK) $(KERNEL32) ::KERNEL32.DLL
 	mcopy -i $(DISK) $(NTDLL) ::NTDLL.DLL
+	mcopy -i $(DISK) $(ADVAPI32) ::ADVAPI32.DLL
 	mcopy -i $(DISK) $(EXTRA) ::EXTRA.DLL
 	mcopy -i $(DISK) user/message.txt ::MESSAGE.TXT
 	@echo "  DISK  $(DISK)"

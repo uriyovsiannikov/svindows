@@ -152,6 +152,22 @@ the input thread can't repaint it mid-update. That keeps a console scroll from
 smearing the cursor across the screen. A window/compositor model comes next
 (see the roadmap).
 
+## The registry
+
+The Configuration Manager (`Cm`, `cm/registry.c`) keeps a hierarchical
+key/value store in memory: keys form a tree under an anonymous root whose child
+`Registry` anchors absolute paths (`\Registry\Machine\...`), and each key holds
+a list of named, typed values (`REG_SZ`, `REG_DWORD`, ...). Keys are handed to
+ring 3 as **`Key` objects** — `NtCreateKey`/`NtOpenKey` wrap the persistent
+tree node in an Ob object and return a handle, so `NtClose` releases a key like
+any other handle while the tree itself persists. `NtSetValueKey`/
+`NtQueryValueKey` take a small parameter block by pointer (the syscall path
+marshals only four registers). `advapi32.dll` layers the classic `Reg*` API on
+top: predefined roots (`HKEY_LOCAL_MACHINE`, ...) map to absolute paths opened
+from the root, and a real key handle passes through as the parent for a relative
+open — so `app.exe → advapi32 → ntdll → syscall → Cm` is the full path a
+registry call takes.
+
 ## Executive components
 
 The directory names match NT's internal prefixes, so a symbol like
@@ -165,6 +181,7 @@ The directory names match NT's internal prefixes, so a symbol like
 | `Ob`   | `ob/`     | object manager: object types, handles, namespace           | working |
 | `Ps`   | `ps/`     | processes and threads (PEB/TEB, user process creation)     | early |
 | `Io`   | `io/`     | ATA PIO, FAT32, File objects, handle-based file services    | early |
+| `Cm`   | `cm/`     | Configuration Manager: the registry (keys, values, hive)    | early |
 | `Ex`   | `ex/`     | executive support: pool allocator, sync primitives         | early |
 | `Ldr`  | `ldr/`    | PE/COFF image loader                                       | early |
 | `Rtl`  | `rtl/`    | runtime library: strings, memory, lists, formatting        | early |

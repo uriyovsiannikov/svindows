@@ -13,3 +13,7 @@ EXPORTS
     NtWaitForSingleObject
     NtCreateThread
     NtLoadLibrary
+    NtCreateKey
+    NtOpenKey
+    NtSetValueKey
+    NtQueryValueKey

@@ -36,3 +36,7 @@ SYSCALL_STUB NtSetEvent,              9
 SYSCALL_STUB NtWaitForSingleObject,   10
 SYSCALL_STUB NtCreateThread,          11
 SYSCALL_STUB NtLoadLibrary,           12
+SYSCALL_STUB NtCreateKey,             13
+SYSCALL_STUB NtOpenKey,               14
+SYSCALL_STUB NtSetValueKey,           15
+SYSCALL_STUB NtQueryValueKey,         16

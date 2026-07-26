@@ -39,6 +39,24 @@ __declspec(dllimport) LPVOID  HeapAlloc(HANDLE heap, DWORD flags, SIZE_T bytes);
 __declspec(dllimport) BOOL    HeapFree(HANDLE heap, DWORD flags, LPVOID ptr);
 __declspec(dllimport) HANDLE  LoadLibraryA(const char *name);
 
+/* Registry (advapi32). */
+typedef void *HKEY;
+typedef long  LONG;
+#define HKEY_CURRENT_USER  ((HKEY)(ULONGLONG)0x80000001ULL)
+#define HKEY_LOCAL_MACHINE ((HKEY)(ULONGLONG)0x80000002ULL)
+#define REG_SZ     1
+#define REG_DWORD  4
+#define KEY_READ   0x20019
+
+__declspec(dllimport) LONG RegOpenKeyExA(HKEY, const char *, DWORD, DWORD, HKEY *);
+__declspec(dllimport) LONG RegCreateKeyExA(HKEY, const char *, DWORD, char *, DWORD,
+                                           DWORD, void *, HKEY *, DWORD *);
+__declspec(dllimport) LONG RegSetValueExA(HKEY, const char *, DWORD, DWORD,
+                                          const BYTE *, DWORD);
+__declspec(dllimport) LONG RegQueryValueExA(HKEY, const char *, DWORD *, DWORD *,
+                                            BYTE *, DWORD *);
+__declspec(dllimport) LONG RegCloseKey(HKEY);
+
 static HANDLE g_out;
 
 static DWORD str_len(const char *s)
@@ -72,6 +90,22 @@ static void print_ptr(const char *label, ULONGLONG v)
     print(label);
     print_hex(v);
     print("\n");
+}
+
+static void print_dec(DWORD v)
+{
+    char t[11];
+    int i = 10;
+    t[10] = 0;
+    if (v == 0) {
+        print("0");
+        return;
+    }
+    while (v) {
+        t[--i] = (char)('0' + (v % 10));
+        v /= 10;
+    }
+    print(&t[i]);
 }
 
 /* Type of the GetProcessHeap we resolve dynamically. */
@@ -137,6 +171,49 @@ static void demo_loadlibrary(void)
         print_ptr("  ExtraAddNumbers(40, 2) = ", (ULONGLONG)add(40, 2));
 }
 
+/* Read a preset registry value, then create a key, write a value, and read it
+ * back — the classic Reg* flow, over our in-kernel registry. */
+static void demo_registry(void)
+{
+    print("\n-- registry (advapi32 Reg* over Nt*Key) --\n");
+
+    HKEY hk;
+    if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, "Software\\NTOS", 0, KEY_READ, &hk) == 0) {
+        char ver[64];
+        DWORD sz = sizeof(ver), type = 0;
+        if (RegQueryValueExA(hk, "Version", 0, &type, (BYTE *)ver, &sz) == 0) {
+            print("  HKLM\\Software\\NTOS\\Version = ");
+            print(ver);
+            print("\n");
+        }
+        DWORD build = 0, bsz = sizeof(build);
+        if (RegQueryValueExA(hk, "BuildNumber", 0, &type, (BYTE *)&build, &bsz) == 0) {
+            print("  HKLM\\Software\\NTOS\\BuildNumber = ");
+            print_dec(build);
+            print("\n");
+        }
+        RegCloseKey(hk);
+    } else {
+        print("  (could not open HKLM\\Software\\NTOS)\n");
+    }
+
+    HKEY hk2;
+    DWORD disp;
+    if (RegCreateKeyExA(HKEY_CURRENT_USER, "Software\\MyApp", 0, 0, 0, 0, 0,
+                        &hk2, &disp) == 0) {
+        RegSetValueExA(hk2, "Greeting", 0, REG_SZ,
+                       (const BYTE *)"hello from the registry", 24);
+        char got[64];
+        DWORD gsz = sizeof(got);
+        if (RegQueryValueExA(hk2, "Greeting", 0, 0, (BYTE *)got, &gsz) == 0) {
+            print("  wrote + read HKCU\\Software\\MyApp\\Greeting = ");
+            print(got);
+            print("\n");
+        }
+        RegCloseKey(hk2);
+    }
+}
+
 static DWORD WorkerThread(LPVOID param)
 {
     (void)param;
@@ -169,6 +246,9 @@ void Start(void)
 
     /* Load a DLL at runtime and call into it. */
     demo_loadlibrary();
+
+    /* Read and write the registry. */
+    demo_registry();
 
     print("main: exiting via ExitProcess\n");
     ExitProcess(0);

@@ -125,7 +125,11 @@ the kernel allocates from.
       link it into `PEB->Ldr`; the app loads a standalone `extra.dll` (not in
       its import chain), resolves its exports, and calls them. XMM/FPU state is
       now preserved across context switches (FXSAVE/FXRSTOR).
-- [ ] A registry (hive + `NtCreateKey`/`NtQueryValueKey`/...).
+- [x] A **registry**: a Configuration Manager (`Cm`) with an in-memory
+      key/value tree (keys are `Key` objects), `NtCreateKey` / `NtOpenKey` /
+      `NtSetValueKey` / `NtQueryValueKey`, and an `advapi32.dll` with the
+      `RegOpenKeyExA` / `RegCreateKeyExA` / `RegSetValueExA` / `RegQueryValueExA`
+      / `RegCloseKey` surface. (On-disk hives are still future work.)
 - [ ] Grow the Win32 surface (`user32`/`gdi32`, a real CRT, ...) and match the
       real Windows `Nt*` numbers/signatures so that *unmodified* Windows
       binaries can run — the ReactOS/Wine-scale endgame.
