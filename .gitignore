@@ -1,0 +1,12 @@
+# Build output
+/build/
+*.o
+*.elf
+*.iso
+*.bin
+*.d
+
+# Editor / OS cruft
+*.swp
+.DS_Store
+compile_commands.json
