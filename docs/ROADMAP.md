@@ -58,9 +58,20 @@ the kernel allocates from.
 - [x] The `Nt*` system service dispatch table (`KiServiceTable`) with the first
       services (`NtDisplayString`, `NtDisplayNumber`, `NtTerminateThread`),
       exercised by an in-kernel ring-3 test program.
+- [x] Per-thread **TEB** and per-process **PEB** at the Windows x64 offsets,
+      reached through the GS segment in ring 3 (`gs:[0x30]` = TEB self,
+      `gs:[0x60]` = PEB). Correct swapgs model (conditional on ring transition,
+      per-thread `KERNEL_GS_BASE`) so it survives preemption between user and
+      kernel threads.
+- [x] `Ps` bring-up: `PsCreateUserProcess` builds the PEB/TEB and launches the
+      main thread.
+- [x] `NtAllocateVirtualMemory` — the first `Nt*` service with real (memory)
+      semantics rather than a debug helper.
 - [ ] APIC + IOAPIC bring-up; keyboard interrupt (still on the 8259 PIC / PIT).
 - [ ] Capture/validate user-mode pointers (SEH-style probing) instead of
       trusting them.
+- [ ] Match the real Windows `Nt*` numbers/signatures and grow the set
+      (`NtCreateFile`, `NtWriteFile`, `NtCreateThread`, ...).
 
 ## Phase 5 — I/O manager (`Io`)
 

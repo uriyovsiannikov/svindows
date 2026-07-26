@@ -1,10 +1,12 @@
 ; ============================================================================
-; user/testapp.asm - a native NTOS test program that imports from ntdll.
+; user/testapp.asm - a native NTOS test program.
 ;
-; Unlike the earlier version, this calls the Nt* functions provided by ntdll.dll
-; using the Windows x64 calling convention (first argument in RCX). The linker
-; records these as imports (an import directory + IAT); the NTOS PE loader
-; resolves the IAT against the loaded ntdll before the program runs.
+; Demonstrates the ring-3 environment the way a real Windows program sees it:
+;   * imports Nt* from ntdll.dll (resolved through the IAT by the loader),
+;   * reads its TEB and PEB through the GS segment (gs:[0x30], gs:[0x60]),
+;   * allocates memory with NtAllocateVirtualMemory and uses it.
+;
+; Windows x64 calling convention: first integer argument in RCX; RAX returns.
 ; ============================================================================
 bits 64
 default rel
@@ -12,17 +14,30 @@ default rel
 extern NtDisplayString
 extern NtDisplayNumber
 extern NtTerminateThread
+extern NtAllocateVirtualMemory
 
 section .text
 global Start
 Start:
-    sub     rsp, 40               ; 32-byte shadow space + 16-byte alignment
+    and     rsp, -16
+    sub     rsp, 32               ; 32-byte shadow space, stays 16-aligned
 
-    lea     rcx, [message]        ; arg1 in RCX (Windows calling convention)
+    lea     rcx, [message]        ; announce ourselves
     call    NtDisplayString
 
-    mov     ecx, 0x00ABCDEF       ; arg1
-    call    NtDisplayNumber
+    mov     rcx, [gs:0x30]        ; TEB self-pointer (NtTib.Self)
+    call    NtDisplayNumber       ; expect the TEB base
+
+    mov     rax, [gs:0x60]        ; TEB.ProcessEnvironmentBlock
+    mov     rcx, [rax + 0x10]     ; PEB.ImageBaseAddress
+    call    NtDisplayNumber       ; expect the executable's load base
+
+    mov     ecx, 0x1000           ; allocate one page
+    call    NtAllocateVirtualMemory
+    mov     edx, 0x0DEADBEE       ; write a marker...
+    mov     [rax], rdx
+    mov     rcx, [rax]            ; ...and read it back
+    call    NtDisplayNumber       ; expect 0x0DEADBEE
 
     call    NtTerminateThread     ; does not return
 
@@ -31,4 +46,4 @@ Start:
 
 section .rdata
 message:
-    db "Hello from a PE .exe, calling Nt* through ntdll imports!", 0
+    db "Native PE: reading TEB/PEB via GS and allocating memory.", 0

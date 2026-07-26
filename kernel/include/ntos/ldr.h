@@ -20,9 +20,10 @@
  *
  * The image is mapped at its preferred base, its imports are resolved (loading
  * dependency DLLs such as ntdll on demand and patching the IAT), and per-section
- * page permissions are applied.
+ * page permissions are applied. @base_out (optional) receives the load base.
  */
-NTSTATUS LdrLoadExecutable(const void *file, SIZE_T file_size, UINT64 *entry_out);
+NTSTATUS LdrLoadExecutable(const void *file, SIZE_T file_size,
+                           UINT64 *entry_out, UINT64 *base_out);
 
 /* Resolve an exported routine's address in a loaded module. */
 UINT64 LdrGetProcAddress(UINT64 module_base, const char *name);

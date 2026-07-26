@@ -54,6 +54,17 @@ to ring 3. On every context switch the scheduler repoints TSS.RSP0 and the
 KPCR's kernel stack at the incoming thread, so a syscall or interrupt taken from
 ring 3 always lands on that thread's own kernel stack.
 
+**GS and the TEB/PEB.** In ring 3 the GS base points at the thread's TEB, so
+native code finds its environment at the usual offsets (`gs:[0x30]` = TEB self,
+`gs:[0x60]` = PEB, whose `ImageBaseAddress` is at +0x10). In the kernel the GS
+base is the per-CPU block (KPCR). The invariant "GS = KPCR while in ring 0" is
+held by `swapgs`: the syscall stub swaps unconditionally, and interrupt entry/
+exit swap only when the saved CS shows a ring-3 origin. `KERNEL_GS_BASE` (what
+the next kernel-exit swapgs restores) is set to the incoming thread's TEB on
+every context switch, so the model stays correct across preemption between user
+and kernel threads. `Ps` (`ps/process.c`) builds the PEB and TEB and launches
+the main thread via `PsCreateUserProcess`.
+
 ## Loading executables
 
 `Ldr` (`ldr/pe.c`) loads PE32+ images the way Windows does: it maps the image at
@@ -76,7 +87,7 @@ The directory names match NT's internal prefixes, so a symbol like
 | `Hal`  | `hal/`    | port I/O, serial, VGA, PIC, PIT timer, IRQ dispatch        | working |
 | `Mm`   | `mm/`     | physical & virtual memory, direct map, page tables         | working |
 | `Ob`   | `ob/`     | object manager: object types, handles, namespace           | working |
-| `Ps`   | `ps/`     | processes and threads                                      | stub  |
+| `Ps`   | `ps/`     | processes and threads (PEB/TEB, user process creation)     | early |
 | `Io`   | `io/`     | I/O manager, device/driver model, IRPs                     | stub  |
 | `Ex`   | `ex/`     | executive support: pool allocator, sync primitives         | early |
 | `Ldr`  | `ldr/`    | PE/COFF image loader                                       | early |

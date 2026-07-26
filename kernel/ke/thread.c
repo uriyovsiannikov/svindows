@@ -117,7 +117,8 @@ PKTHREAD KeCreateThread(const char *name, PKSTART_ROUTINE routine,
 }
 
 PKTHREAD KeCreateUserThread(const char *name, UINT64 user_entry,
-                            UINT64 user_stack, LONG priority)
+                            UINT64 user_stack, UINT64 user_gs_base,
+                            LONG priority)
 {
     PKTHREAD t = KepAllocThread(name, priority);
     if (!t)
@@ -126,10 +127,12 @@ PKTHREAD KeCreateUserThread(const char *name, UINT64 user_entry,
     t->UserMode = TRUE;
     t->UserEntry = user_entry;
     t->UserStack = user_stack;
+    t->UserGsBase = user_gs_base;
     KepEnqueueThread(t);
 
-    KeLog("[ke]   created user thread '%s' (id %u): entry %p, ustack %p\n",
-          name, t->ThreadId, (void *)user_entry, (void *)user_stack);
+    KeLog("[ke]   created user thread '%s' (id %u): entry %p, ustack %p, teb %p\n",
+          name, t->ThreadId, (void *)user_entry, (void *)user_stack,
+          (void *)user_gs_base);
     return t;
 }
 
@@ -166,9 +169,11 @@ static void KiSchedule(void)
     g_current_thread = next;
 
     /* Point the CPU's ring-0 entry stack at the incoming thread's kernel stack,
-     * so a syscall or interrupt taken from ring 3 lands on the right stack. */
+     * so a syscall or interrupt taken from ring 3 lands on the right stack, and
+     * set the GS base it will see in ring 3 (its TEB). */
     if (next->KernelStackBase)
         KeSetKernelStack(next->KernelStackBase + next->KernelStackSize);
+    KeSetUserGsBase(next->UserGsBase);
 
     KiSwitchContext(&prev->KernelStackPointer, next->KernelStackPointer);
     /* Control returns here only when `prev` is scheduled again. */

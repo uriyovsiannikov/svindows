@@ -145,10 +145,12 @@ typedef struct _KTHREAD {
     struct _KPROCESS *Process;
 
     /* User-mode threads start life in ring 3 at UserEntry with stack UserStack
-     * instead of calling a kernel StartRoutine. */
+     * instead of calling a kernel StartRoutine. UserGsBase is the TEB address
+     * the GS segment resolves to while the thread runs in ring 3. */
     BOOLEAN         UserMode;
     UINT64          UserEntry;
     UINT64          UserStack;
+    UINT64          UserGsBase;
 } KTHREAD, *PKTHREAD;
 
 /*
@@ -166,7 +168,8 @@ void      KeInitializeScheduler(void);
 PKTHREAD  KeCreateThread(const char *name, PKSTART_ROUTINE routine,
                          PVOID context, LONG priority);
 PKTHREAD  KeCreateUserThread(const char *name, UINT64 user_entry,
-                            UINT64 user_stack, LONG priority);
+                            UINT64 user_stack, UINT64 user_gs_base,
+                            LONG priority);
 PKTHREAD  KeGetCurrentThread(void);
 void      KeYield(void);
 NORETURN void KeTerminateThread(void);
@@ -186,6 +189,11 @@ void KiInitializeSystemCalls(void);
 /* Point the CPU's ring-0 entry stack (TSS.RSP0 and the syscall entry's kernel
  * stack) at `kernel_rsp`. The scheduler calls this on every context switch. */
 void KeSetKernelStack(UINT64 kernel_rsp);
+
+/* Set the GS base a thread will see in ring 3 (its TEB); 0 selects the kernel
+ * per-CPU block. The scheduler calls this on every context switch so the
+ * kernel-exit swapgs restores the right per-thread GS. */
+void KeSetUserGsBase(UINT64 teb);
 
 /* Set the TSS ring-0 stack pointer (implemented in gdt.c). */
 void KeSetTssRsp0(UINT64 rsp0);

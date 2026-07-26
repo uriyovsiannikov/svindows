@@ -46,6 +46,10 @@ The kernel currently:
   to `Nt*` go through the import table into ntdll's syscall stubs. Both images
   are built by the standard toolchain (`nasm -f win64` + `lld-link`). This is
   the authentic Windows load-and-link flow; the syscall ABI matches Windows.
+- Sets up the **PEB and TEB** at the Windows x64 layout: ring-3 code reads its
+  TEB through `gs:[0x30]` and its PEB through `gs:[0x60]` (a correct swapgs
+  model keeps GS consistent across ring transitions and preemption), and can
+  request memory with a real `NtAllocateVirtualMemory` service.
 
 See [`docs/ROADMAP.md`](docs/ROADMAP.md) for what comes next (physical/virtual
 memory manager, object manager, threads & scheduler, system-call boundary, and
@@ -85,7 +89,8 @@ kernel/
   ex/            Executive support (pool allocator)
   ob/            Object Manager (types, handles, namespace)
   ldr/           Image loader (PE/COFF, imports/exports) + embedded images
-  ps/ io/        Process / I/O managers (stubs, being filled in)
+  ps/            Process manager (PEB/TEB, user process creation)
+  io/            I/O manager (stub, being filled in)
 user/            Native user-space sources (ntdll.dll, testapp.exe)
 docs/            architecture notes and roadmap
 scripts/         helper scripts

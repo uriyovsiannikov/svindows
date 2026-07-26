@@ -13,6 +13,7 @@
 #include <ntos/ex.h>
 #include <ntos/ob.h>
 #include <ntos/ldr.h>
+#include <ntos/ps.h>
 #include <ntos/rtl.h>
 
 #define NTOS_VERSION "0.5.0"
@@ -192,13 +193,15 @@ void KiSystemStartup(UINT32 magic, UINT32 mbi_phys)
     KeLog("[test] --- loading a PE that imports Nt* from ntdll ---\n");
     KeInitializeScheduler();
 
-    UINT64 pe_entry;
+    UINT64 pe_entry, pe_base;
     NTSTATUS st = LdrLoadExecutable(TestappImageStart,
                                     (SIZE_T)(TestappImageEnd - TestappImageStart),
-                                    &pe_entry);
+                                    &pe_entry, &pe_base);
     if (NT_SUCCESS(st)) {
-        UINT64 user_stack_top = SetupUserStack();
-        KeCreateUserThread("testapp.exe", pe_entry, user_stack_top, 8);
+        UINT64 stack_top = SetupUserStack();
+        UINT64 stack_base = USER_STACK_TOP - USER_STACK_PAGES * PAGE_SIZE;
+        PsCreateUserProcess("testapp.exe", pe_entry, pe_base, stack_base,
+                            stack_top);
     } else {
         KeLog("[test] failed to load PE: status 0x%08x\n", (unsigned)st);
     }

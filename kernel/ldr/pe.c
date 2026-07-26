@@ -306,7 +306,8 @@ static UINT64 LdrpLoadModule(const char *name)
 /* Public entry point                                                 */
 /* ------------------------------------------------------------------ */
 
-NTSTATUS LdrLoadExecutable(const void *file, SIZE_T file_size, UINT64 *entry_out)
+NTSTATUS LdrLoadExecutable(const void *file, SIZE_T file_size,
+                           UINT64 *entry_out, UINT64 *base_out)
 {
     UINT64 base;
     NTSTATUS status = LdrpMapImage(file, file_size, &base);
@@ -325,6 +326,8 @@ NTSTATUS LdrLoadExecutable(const void *file, SIZE_T file_size, UINT64 *entry_out
     LdrpProtectImage(base);
 
     *entry_out = base + nt->OptionalHeader.AddressOfEntryPoint;
+    if (base_out)
+        *base_out = base;
     KeLog("[ldr]  executable ready; entry at %p\n", (void *)*entry_out);
     return STATUS_SUCCESS;
 }

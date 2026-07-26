@@ -41,6 +41,13 @@ isr%1:
 
 ; ---- common trap path -----------------------------------------------------
 isr_common:
+    ; If we came from ring 3, swap to the kernel GS base so the invariant
+    ; "GS = KPCR while in the kernel" holds regardless of entry path. The saved
+    ; CS is at [rsp+24] here: vector(0) error(8) rip(16) cs(24).
+    test    byte [rsp + 24], 3
+    jz      .from_kernel
+    swapgs
+.from_kernel:
     ; Save general-purpose registers. Pushed rax-first so that after the last
     ; push (r15) the in-memory order low->high is r15..rax, matching KTRAP_FRAME.
     push    rax
@@ -85,6 +92,13 @@ isr_common:
     pop     rax
 
     add     rsp, 16           ; discard vector + error code
+
+    ; Symmetric to entry: if returning to ring 3, restore the user GS base.
+    ; After the add, the saved CS is at [rsp+8]: rip(0) cs(8).
+    test    byte [rsp + 8], 3
+    jz      .to_kernel
+    swapgs
+.to_kernel:
     iretq
 
 ; ---- table of stub addresses, consumed by KeInitializeIdt ------------------

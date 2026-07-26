@@ -55,6 +55,10 @@ KiEnterUserMode:
     mov     ds, ax
     mov     es, ax
 
+    ; Switch the active GS base to this thread's TEB (held in KERNEL_GS_BASE by
+    ; the scheduler) before entering ring 3.
+    swapgs
+
     push    0x1B                  ; SS  = user data | 3
     push    rsi                   ; RSP = user stack
     push    0x202                 ; RFLAGS: IF=1, reserved bit set
