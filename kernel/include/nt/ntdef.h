@@ -68,6 +68,21 @@ typedef __INTPTR_TYPE__    INT_PTR;
 typedef UCHAR              BOOLEAN, *PBOOLEAN;
 typedef int                BOOL, *PBOOL;
 
+/* Handles and access ----------------------------------------------- */
+
+typedef void              *HANDLE, **PHANDLE;
+typedef ULONG              ACCESS_MASK, *PACCESS_MASK;
+
+/* Generic access rights (subset). */
+#define DELETE                 0x00010000u
+#define READ_CONTROL           0x00020000u
+#define SYNCHRONIZE            0x00100000u
+#define STANDARD_RIGHTS_ALL    0x001F0000u
+#define GENERIC_READ           0x80000000u
+#define GENERIC_WRITE          0x40000000u
+#define GENERIC_EXECUTE        0x20000000u
+#define GENERIC_ALL            0x10000000u
+
 /* ------------------------------------------------------------------ */
 /* Status                                                             */
 /* ------------------------------------------------------------------ */

@@ -27,12 +27,16 @@ observable. Checked items are done and verified in QEMU.
 Also done in this phase: the executive pool allocator (`Ex`) that the rest of
 the kernel allocates from.
 
-## Phase 2 — Executive & Object manager (`Ex`, `Ob`)
+## Phase 2 — Object manager (`Ob`) (in progress)
 
-- [ ] Object manager: object types, headers, reference counting.
-- [ ] Handle tables and `Nt`-style handle-based APIs.
-- [ ] Object namespace (`\`, `\Device`, `\??`, …).
-- [ ] Synchronization objects: events, mutexes, semaphores.
+- [x] Object manager: object types, object headers, reference counting with
+      per-type delete procedures.
+- [x] Handle table with granted-access masks (`ObCreateHandle`,
+      `ObReferenceObjectByHandle`, `ObCloseHandle`). `Nt`-style handle APIs on
+      top of it arrive with the system-call layer in Phase 4.
+- [x] Object namespace: `Directory` objects, the root `\`, insert-by-name and
+      absolute-path lookup (e.g. `\Device\TestEvent`).
+- [ ] Synchronization objects: events, mutexes, semaphores (needs `Ke` waits).
 
 ## Phase 3 — Threads, processes, scheduler (`Ke`, `Ps`)
 

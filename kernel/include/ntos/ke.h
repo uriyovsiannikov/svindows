@@ -11,6 +11,25 @@
 #include <stdarg.h>
 
 /* ------------------------------------------------------------------ */
+/* Atomic (interlocked) operations                                    */
+/* ------------------------------------------------------------------ */
+
+static ALWAYS_INLINE LONG InterlockedIncrement(volatile LONG *value)
+{
+    return __atomic_add_fetch(value, 1, __ATOMIC_SEQ_CST);
+}
+
+static ALWAYS_INLINE LONG InterlockedDecrement(volatile LONG *value)
+{
+    return __atomic_sub_fetch(value, 1, __ATOMIC_SEQ_CST);
+}
+
+static ALWAYS_INLINE LONG InterlockedExchange(volatile LONG *target, LONG value)
+{
+    return __atomic_exchange_n(target, value, __ATOMIC_SEQ_CST);
+}
+
+/* ------------------------------------------------------------------ */
 /* Boot information handed to the kernel by the boot trampoline        */
 /* ------------------------------------------------------------------ */
 

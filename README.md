@@ -29,6 +29,9 @@ The kernel currently:
   physical frames from a bitmap **PMM**, builds its own page tables with a
   full-RAM **direct map** (dropping the identity map), and serves kernel
   allocations from a growable **pool** (`ExAllocatePool`).
+- Provides an **object manager** (`Ob`): reference-counted objects with typed
+  delete procedures, a handle table with access masks, and a `\`-rooted object
+  namespace with directories and path lookup.
 
 See [`docs/ROADMAP.md`](docs/ROADMAP.md) for what comes next (physical/virtual
 memory manager, object manager, threads & scheduler, system-call boundary, and
@@ -66,7 +69,8 @@ kernel/
   rtl/           Runtime Library (memory, string, formatted print, lists)
   mm/            Memory Manager (multiboot map, PMM, page tables, direct map)
   ex/            Executive support (pool allocator)
-  ob/ ps/ io/    Object / Process / I/O managers (stubs, being filled in)
+  ob/            Object Manager (types, handles, namespace)
+  ps/ io/        Process / I/O managers (stubs, being filled in)
 docs/            architecture notes and roadmap
 scripts/         helper scripts
 ```

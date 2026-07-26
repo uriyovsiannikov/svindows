@@ -50,7 +50,7 @@ The directory names match NT's internal prefixes, so a symbol like
 | `Ke`   | `ke/`     | CPU control, interrupts/traps, scheduling, synchronization | early |
 | `Hal`  | `hal/`    | port I/O, serial, VGA, timers, interrupt controllers       | early |
 | `Mm`   | `mm/`     | physical & virtual memory, direct map, page tables         | working |
-| `Ob`   | `ob/`     | object manager: object types, handles, namespace           | stub  |
+| `Ob`   | `ob/`     | object manager: object types, handles, namespace           | working |
 | `Ps`   | `ps/`     | processes and threads                                      | stub  |
 | `Io`   | `io/`     | I/O manager, device/driver model, IRPs                     | stub  |
 | `Ex`   | `ex/`     | executive support: pool allocator, sync primitives         | early |

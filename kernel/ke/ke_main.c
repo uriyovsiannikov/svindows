@@ -11,9 +11,67 @@
 #include <ntos/hal.h>
 #include <ntos/mm.h>
 #include <ntos/ex.h>
+#include <ntos/ob.h>
 #include <ntos/rtl.h>
 
-#define NTOS_VERSION "0.1.0"
+#define NTOS_VERSION "0.2.0"
+
+/* Delete procedure for the demo "Event" object type. */
+static void DemoEventDelete(POBJECT object)
+{
+    KeLog("[test]   -> Event delete procedure ran for object %p\n", object);
+}
+
+static void ObjectManagerDemo(void)
+{
+    KeLog("[test] --- object manager demo ---\n");
+
+    POBJECT_TYPE event_type = ObCreateObjectType("Event", DemoEventDelete);
+
+    /* Lifetime via references and a handle. */
+    POBJECT e1;
+    ObCreateObject(event_type, 32, &e1);
+    KeLog("[test] created Event e1=%p refs=%d\n", e1, ObGetReferenceCount(e1));
+
+    HANDLE h1;
+    ObCreateHandle(e1, GENERIC_ALL, &h1);
+    KeLog("[test] opened handle %p to e1; refs=%d\n", h1, ObGetReferenceCount(e1));
+
+    POBJECT resolved;
+    if (NT_SUCCESS(ObReferenceObjectByHandle(h1, GENERIC_READ, event_type,
+                                             &resolved))) {
+        KeLog("[test] handle resolves to %p (refs=%d), releasing\n",
+              resolved, ObGetReferenceCount(resolved));
+        ObDereferenceObject(resolved);
+    }
+
+    ObDereferenceObject(e1); /* drop the creator's reference; handle still holds */
+    KeLog("[test] dropped creator ref; refs=%d (handle keeps it alive)\n",
+          ObGetReferenceCount(e1));
+    KeLog("[test] closing the handle should delete the object:\n");
+    ObCloseHandle(h1);
+
+    /* Namespace: \Device\TestEvent. */
+    struct _OBJECT_DIRECTORY *device_dir;
+    ObCreateDirectory(ObRootDirectory, "Device", &device_dir);
+
+    POBJECT e2;
+    ObCreateObject(event_type, 32, &e2);
+    ObInsertObjectByName(device_dir, "TestEvent", e2);
+    ObDereferenceObject(e2); /* namespace now owns it */
+    KeLog("[test] inserted \\Device\\TestEvent\n");
+
+    POBJECT found;
+    NTSTATUS st = ObLookupObjectByName("\\Device\\TestEvent", &found);
+    KeLog("[test] lookup \\Device\\TestEvent -> status=0x%08x obj=%p\n",
+          (unsigned)st, NT_SUCCESS(st) ? found : NULL);
+    if (NT_SUCCESS(st))
+        ObDereferenceObject(found);
+
+    st = ObLookupObjectByName("\\Device\\Missing", &found);
+    KeLog("[test] lookup \\Device\\Missing -> status=0x%08x (expected not found)\n",
+          (unsigned)st);
+}
 
 static void print_banner(void)
 {
@@ -87,8 +145,12 @@ void KiSystemStartup(UINT32 magic, UINT32 mbi_phys)
     KeLog("[test] after freeing all, in use %lu bytes\n",
           (unsigned long)ExPoolBytesInUse());
 
+    /* Phase 2: object manager. */
+    ObInitialize();
+    ObjectManagerDemo();
+
     HalVgaSetColor(VGA_COLOR(VGA_LGREEN, VGA_BLACK));
-    KeLog("\n[ok]   phase 1 (memory) initialization complete. Halting (idle).\n");
+    KeLog("\n[ok]   phase 2 (object manager) initialization complete. Halting (idle).\n");
     HalVgaSetColor(VGA_COLOR(VGA_LGRAY, VGA_BLACK));
 
     /* No scheduler yet: park the boot processor. */
