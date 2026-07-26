@@ -38,7 +38,12 @@ The kernel currently:
   `KeTerminateThread`.
 - Drops to **ring 3 (user mode)** and services **`syscall`/`sysret`** system
   calls through a `KiServiceTable` of `Nt*` routines — the same mechanism a
-  native `ntdll` uses, and the bridge toward loading real `.exe` binaries.
+  native `ntdll` uses.
+- **Loads and runs a real PE (`.exe`) executable**: a `LdrLoadPeImage` loader
+  parses the PE32+ headers, maps sections at their RVAs with per-section
+  permissions, and runs the image in ring 3, where it calls back into the
+  kernel via syscalls. The test `.exe` is built by the standard toolchain
+  (`nasm -f win64` + `lld-link`) and embedded in the kernel.
 
 See [`docs/ROADMAP.md`](docs/ROADMAP.md) for what comes next (physical/virtual
 memory manager, object manager, threads & scheduler, system-call boundary, and
@@ -77,7 +82,9 @@ kernel/
   mm/            Memory Manager (multiboot map, PMM, page tables, direct map)
   ex/            Executive support (pool allocator)
   ob/            Object Manager (types, handles, namespace)
+  ldr/           Image loader (PE/COFF) + embedded test executable
   ps/ io/        Process / I/O managers (stubs, being filled in)
+user/            Native user-space programs (built as PE, e.g. testapp.exe)
 docs/            architecture notes and roadmap
 scripts/         helper scripts
 ```

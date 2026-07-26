@@ -68,6 +68,7 @@ The directory names match NT's internal prefixes, so a symbol like
 | `Ps`   | `ps/`     | processes and threads                                      | stub  |
 | `Io`   | `io/`     | I/O manager, device/driver model, IRPs                     | stub  |
 | `Ex`   | `ex/`     | executive support: pool allocator, sync primitives         | early |
+| `Ldr`  | `ldr/`    | PE/COFF image loader                                       | early |
 | `Rtl`  | `rtl/`    | runtime library: strings, memory, lists, formatting        | early |
 
 ## Calling conventions and the NT ABI

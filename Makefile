@@ -37,6 +37,11 @@ C_SRC   := $(shell find kernel -name '*.c')
 ASM_SRC := $(shell find kernel -name '*.asm')
 OBJ     := $(patsubst %,$(BUILD)/%.o,$(C_SRC) $(ASM_SRC))
 
+# User-space test program, built as a real PE32+ executable and embedded in the
+# kernel image (see kernel/ldr/testpe.asm).
+TESTAPP := $(BUILD)/testapp.exe
+LLDLINK := lld-link
+
 QEMU        := qemu-system-x86_64
 QEMUFLAGS   := -m 256M -no-reboot -no-shutdown
 
@@ -51,6 +56,17 @@ $(BUILD)/%.c.o: %.c
 $(BUILD)/%.asm.o: %.asm
 	@mkdir -p $(dir $@)
 	$(NASM) $(NASMFLAGS) $< -o $@
+
+# Test PE executable: assemble win64 object, link into a PE with LLD.
+$(TESTAPP): user/testapp.asm
+	@mkdir -p $(BUILD)
+	$(NASM) -f win64 $< -o $(BUILD)/testapp.obj
+	$(LLDLINK) /subsystem:console /entry:Start /nodefaultlib \
+	           /out:$@ $(BUILD)/testapp.obj
+	@echo "  PE    $@"
+
+# The embedding stub incbin's the PE, so it must exist before we assemble it.
+$(BUILD)/kernel/ldr/testpe.asm.o: $(TESTAPP)
 
 $(KERNEL): $(OBJ) kernel/arch/x86_64/linker.ld
 	@mkdir -p $(dir $@)

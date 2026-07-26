@@ -12,19 +12,21 @@
 #include <ntos/mm.h>
 #include <ntos/ex.h>
 #include <ntos/ob.h>
+#include <ntos/ldr.h>
 #include <ntos/rtl.h>
 
-#define NTOS_VERSION "0.4.0"
+#define NTOS_VERSION "0.5.0"
 
-/* The ring-3 test program, copied into user memory (see arch/x86_64/user_stub.asm). */
-extern char UserStubStart[];
-extern char UserStubEnd[];
+/* The embedded test PE executable (see kernel/ldr/testpe.asm). */
+extern char TestPeStart[];
+extern char TestPeEnd[];
 
-#define USER_CODE_VA  0x0000000000400000ULL
-#define USER_STACK_VA 0x0000000000800000ULL
+/* User stack for the loaded program (grows down from the top). */
+#define USER_STACK_TOP   0x0000000010010000ULL
+#define USER_STACK_PAGES 16
 
 /* A demo kernel thread: print a few iterations with busy work in between so the
- * timer preempts it and it interleaves with the other threads. */
+ * timer preempts it and it interleaves with the user program. */
 static void DemoWorker(PVOID context)
 {
     const char *name = (const char *)context;
@@ -37,24 +39,17 @@ static void DemoWorker(PVOID context)
     KeLog("   [kthread %s] finished\n", name);
 }
 
-/* Allocate and map the user program's code and stack, copy the position-
- * independent stub into it, and return the top of the user stack. */
-static UINT64 SetupUserProgram(void)
+/* Map a user stack and return its (16-byte aligned) top. */
+static UINT64 SetupUserStack(void)
 {
-    UINT64 code_phys = MmAllocatePage();
-    UINT64 stack_phys = MmAllocatePage();
-    if (code_phys == MM_INVALID_PHYS || stack_phys == MM_INVALID_PHYS)
-        KeBugCheck(KE_PHASE0_INITIALIZATION_FAILED, "no memory for user program");
-
-    MmMapPage(USER_CODE_VA, code_phys, PTE_USER);               /* r-x, user */
-    MmMapPage(USER_STACK_VA, stack_phys, PTE_USER | PTE_WRITE); /* rw-, user */
-
-    SIZE_T len = (SIZE_T)(UserStubEnd - UserStubStart);
-    memcpy(MmPhysToVirt(code_phys), UserStubStart, len);
-
-    KeLog("[test] user image: %lu bytes at %p, user stack at %p\n",
-          (unsigned long)len, (void *)USER_CODE_VA, (void *)USER_STACK_VA);
-    return USER_STACK_VA + PAGE_SIZE; /* stack grows down from the page top */
+    UINT64 base = USER_STACK_TOP - USER_STACK_PAGES * PAGE_SIZE;
+    for (UINT64 i = 0; i < USER_STACK_PAGES; i++) {
+        UINT64 pa = MmAllocatePage();
+        if (pa == MM_INVALID_PHYS)
+            KeBugCheck(KE_PHASE0_INITIALIZATION_FAILED, "no memory for user stack");
+        MmMapPage(base + i * PAGE_SIZE, pa, PTE_USER | PTE_WRITE);
+    }
+    return USER_STACK_TOP;
 }
 
 /* Delete procedure for the demo "Event" object type. */
@@ -193,24 +188,32 @@ void KiSystemStartup(UINT32 magic, UINT32 mbi_phys)
     ObInitialize();
     ObjectManagerDemo();
 
-    /* Phase 3 + 4: the scheduler running a kernel thread and a ring-3 thread. */
-    KeLog("[test] --- scheduler + user-mode (ring 3) demo ---\n");
+    /* Phase 6: load a real PE executable and run it in ring 3. */
+    KeLog("[test] --- loading and running an embedded PE executable ---\n");
     KeInitializeScheduler();
 
-    UINT64 user_stack_top = SetupUserProgram();
+    UINT64 pe_entry, pe_base;
+    NTSTATUS st = LdrLoadPeImage(TestPeStart, (SIZE_T)(TestPeEnd - TestPeStart),
+                                 &pe_entry, &pe_base);
+    if (NT_SUCCESS(st)) {
+        UINT64 user_stack_top = SetupUserStack();
+        KeCreateUserThread("testapp.exe", pe_entry, user_stack_top, 8);
+    } else {
+        KeLog("[test] failed to load PE: status 0x%08x\n", (unsigned)st);
+    }
+
     KeCreateThread("KWorker", DemoWorker, (PVOID)"KWorker", 8);
-    KeCreateUserThread("UserApp", USER_CODE_VA, user_stack_top, 8);
 
     HalInitializePic();
     HalRegisterIrqHandler(0, KeClockTick);
     HalInitializeTimer(100); /* 100 Hz preemption tick */
 
     HalVgaSetColor(VGA_COLOR(VGA_LGREEN, VGA_BLACK));
-    KeLog("\n[ok]   phase 4 online: kernel + user threads under the scheduler.\n");
+    KeLog("\n[ok]   PE loaded; running it in ring 3 alongside a kernel thread.\n");
     HalVgaSetColor(VGA_COLOR(VGA_LGRAY, VGA_BLACK));
 
-    /* Become the idle thread. The scheduler will run the kernel worker and the
-     * ring-3 user program, which makes syscalls back into the kernel. */
+    /* Become the idle thread. The scheduler runs the ring-3 PE (which makes
+     * syscalls) and the kernel worker. */
     __sti();
     for (;;)
         __halt();

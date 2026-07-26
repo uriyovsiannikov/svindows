@@ -72,11 +72,19 @@ int RtlFormatV(char *buffer, SIZE_T size, const char *fmt, va_list ap)
 
         p++; /* consume '%' */
 
-        /* Flags: only '0' (zero pad) is meaningful here. */
+        /* Flags: '0' (zero pad) and '-' (left justify). */
         BOOLEAN zero_pad = FALSE;
-        while (*p == '0') {
-            zero_pad = TRUE;
-            p++;
+        BOOLEAN left = FALSE;
+        for (;;) {
+            if (*p == '0') {
+                zero_pad = TRUE;
+                p++;
+            } else if (*p == '-') {
+                left = TRUE;
+                p++;
+            } else {
+                break;
+            }
         }
 
         /* Minimum field width. */
@@ -111,11 +119,15 @@ int RtlFormatV(char *buffer, SIZE_T size, const char *fmt, va_list ap)
             const char *str = va_arg(ap, const char *);
             if (!str)
                 str = "(null)";
-            SIZE_T len = strlen(str);
-            for (SIZE_T i = (SIZE_T)len; (int)i < width; i++)
-                sink_putc(&s, ' ');
+            int len = (int)strlen(str);
+            if (!left)
+                for (int i = len; i < width; i++)
+                    sink_putc(&s, ' ');
             while (*str)
                 sink_putc(&s, *str++);
+            if (left)
+                for (int i = len; i < width; i++)
+                    sink_putc(&s, ' ');
             break;
         }
 

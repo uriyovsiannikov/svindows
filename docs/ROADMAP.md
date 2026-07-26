@@ -67,14 +67,22 @@ the kernel allocates from.
 - [ ] Device / driver objects, IRP model.
 - [ ] A RAM-disk and a simple file system (FAT) for loading binaries.
 
-## Phase 6 — The NT user-mode boundary
+## Phase 6 — The NT user-mode boundary (in progress)
 
-- [ ] PE/COFF image loader in the kernel.
-- [ ] A minimal `ntdll` that thunks native calls to `syscall`.
-- [ ] Load and run the first native PE `.exe` (a program that calls
-      `NtWriteFile` / `NtTerminateProcess`).
-- [ ] Grow the native API surface; later, a Win32 personality
-      (`kernel32`/`user32`) — the ReactOS/Wine-scale endgame.
+- [x] PE/COFF image loader in the kernel (`LdrLoadPeImage`): validates the
+      MZ/PE headers, maps `SizeOfImage`, lays out sections at their RVAs with
+      per-section permissions, zero-fills BSS, and applies base relocations.
+- [x] Load and run the first native PE `.exe` in ring 3 — an image built by the
+      standard toolchain (`nasm -f win64` + `lld-link`), embedded in the kernel,
+      that prints and terminates itself purely through NTOS syscalls. The
+      syscall ABI plays the role a real `ntdll` will later fill.
+- [ ] A real `ntdll` stub library user images link against (instead of raw
+      `syscall` instructions), plus PE imports (IAT) resolution.
+- [ ] Load PE images from a filesystem (needs Phase 5) rather than an embedded
+      blob.
+- [ ] Grow the native API surface toward the real Windows `Nt*` set; later a
+      Win32 personality (`kernel32`/`user32`) so that *unmodified* Windows
+      binaries can run — the ReactOS/Wine-scale endgame.
 
 ## Guiding rule
 
