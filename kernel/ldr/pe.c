@@ -423,10 +423,27 @@ static void LdrpInitializeGuardPointers(UINT64 base)
  * without adding another initialization dependency edge. These contracts are
  * consumed late by Shell/OLE and adding a synthetic edge for them creates a
  * cycle that changes the proven USER32/combase attach order. */
+static BOOLEAN LdrpNameContains(const char *name, const char *needle)
+{
+    for (; *name; name++) {
+        const char *n = needle, *m = name;
+        while (*n && *m && *n == *m) {
+            n++;
+            m++;
+        }
+        if (!*n)
+            return TRUE;
+    }
+    return FALSE;
+}
+
 static UINT64 LdrpLateApiSetHost(const char *name)
 {
-    if (strncmp(name, "ext-ms-win-rtcore-ntuser-window-ext-",
-                sizeof("ext-ms-win-rtcore-ntuser-window-ext-") - 1) == 0)
+    /* The USER/GDI surface ships under many contract names (ntuser window,
+     * windowclass, message, menu, synch, sysparams, ... plus the gdi families).
+     * They all live in the genuine user32/gdi32, but only bind if that host is
+     * already in the module cache, so no initialization edge is added. */
+    if (LdrpNameContains(name, "ntuser"))
         return lookup_module("user32.dll");
     return 0;
 }

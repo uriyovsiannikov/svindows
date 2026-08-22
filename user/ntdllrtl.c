@@ -1459,7 +1459,7 @@ __attribute__((noinline)) void LdrpRegisterWowHandlers(void)
         /* Walk user32's export table for UserRegisterWowHandlers. */
         DWORD pe_offset = *(DWORD *)(dll_base + 0x3C);
         DWORD *dd = (DWORD *)(dll_base + pe_offset + 24 + 112);
-        DWORD exp_rva = dd[4], exp_size = dd[5];
+        DWORD exp_rva = dd[0], exp_size = dd[1]; /* directory entry 0 */
         if (!exp_rva || !exp_size)
             return;
         BYTE *dir = dll_base + exp_rva;
@@ -1492,6 +1492,7 @@ __attribute__((noinline)) void LdrpRegisterWowHandlers(void)
             handlers[6] = dll_base + 0xD1A0;
             BYTE allowed = 0;
             register_handlers(handlers, &allowed);
+            NtDisplayString("[ntdll] WowHandlers registered\r\n");
             return;
         }
         return;

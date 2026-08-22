@@ -1507,6 +1507,8 @@ __declspec(dllexport) void OutputDebugStringW(const WCHAR *text)
 }
 
 #define LOCAL_ATOM_CAPACITY 128
+#define UINT32_K DWORD
+#define UINT_PTR_K unsigned long long
 static WCHAR g_atom_names[LOCAL_ATOM_CAPACITY][64];
 static WORD g_atom_count;
 
@@ -1535,6 +1537,167 @@ __declspec(dllexport) WORD GlobalAddAtomW(const WCHAR *name)
 __declspec(dllexport) WORD AddAtomW(const WCHAR *name)
 {
     return GlobalAddAtomW(name);
+}
+
+/* Case-insensitive lookup in the process atom table. */
+static WORD KiFindAtomW(const WCHAR *name)
+{
+    if (!name)
+        return 0;
+    /* Integer atom: callers pass MAKEINTATOM(i) as (WCHAR *)(UINT_PTR_K)i. */
+    if ((UINT_PTR_K)name < 0xC000)
+        return (WORD)(UINT_PTR_K)name;
+    for (WORD i = 0; i < g_atom_count; i++) {
+        unsigned j = 0;
+        for (;;) {
+            WCHAR a = g_atom_names[i][j], b = name[j];
+            if (a >= 'A' && a <= 'Z')
+                a += 32;
+            if (b >= 'A' && b <= 'Z')
+                b += 32;
+            if (a != b)
+                break;
+            if (!a)
+                return (WORD)(0xc000 + i);
+            j++;
+        }
+    }
+    return 0;
+}
+
+__declspec(dllexport) WORD GlobalFindAtomW(const WCHAR *name)
+{
+    return KiFindAtomW(name);
+}
+
+__declspec(dllexport) WORD FindAtomW(const WCHAR *name)
+{
+    return KiFindAtomW(name);
+}
+
+/* The A variants see ASCII names; widen in place before the shared lookup. */
+__declspec(dllexport) WORD GlobalAddAtomA(const char *name)
+{
+    if (!name)
+        return 0;
+    WCHAR wide[64];
+    unsigned i = 0;
+    for (; name[i] && i < 63; i++)
+        wide[i] = (WCHAR)(unsigned char)name[i];
+    wide[i] = 0;
+    return GlobalAddAtomW(wide);
+}
+
+__declspec(dllexport) WORD GlobalFindAtomA(const char *name)
+{
+    if (!name)
+        return 0;
+    if ((UINT_PTR_K)name < 0xC000)
+        return (WORD)(UINT_PTR_K)name;
+    WCHAR wide[64];
+    unsigned i = 0;
+    for (; name[i] && i < 63; i++)
+        wide[i] = (WCHAR)(unsigned char)name[i];
+    wide[i] = 0;
+    return KiFindAtomW(wide);
+}
+
+__declspec(dllexport) WORD AddAtomA(const char *name)
+{
+    return GlobalAddAtomA(name);
+}
+
+__declspec(dllexport) WORD FindAtomA(const char *name)
+{
+    return GlobalFindAtomA(name);
+}
+
+__declspec(dllexport) WORD GlobalAddAtomExW(const WCHAR *name, DWORD flags)
+{
+    (void)flags;
+    return GlobalAddAtomW(name);
+}
+
+__declspec(dllexport) WORD GlobalAddAtomExA(const char *name, DWORD flags)
+{
+    (void)flags;
+    return GlobalAddAtomA(name);
+}
+
+/* Deleting keeps the slot: per-atom reference counting is not worth a table
+ * yet, and USER only deletes classes at process exit. */
+__declspec(dllexport) WORD GlobalDeleteAtom(WORD atom)
+{
+    return 0;
+}
+
+__declspec(dllexport) WORD DeleteAtom(WORD atom)
+{
+    return 0;
+}
+
+static UINT32_K KiAtomNameToWide(WORD atom, WCHAR *out, UINT32_K capacity)
+{
+    if (!out || !capacity)
+        return 0;
+    if (atom < 0xC000) {
+        /* Integer atoms stringify as "#123". */
+        char digits[8];
+        int n = 0;
+        if (!atom)
+            n = 1, digits[0] = '0';
+        for (WORD v = atom; v; v /= 10)
+            digits[n++] = (char)('0' + v % 10);
+        UINT32_K len = 0;
+        out[len++] = '#';
+        while (n && len + 1 < capacity)
+            out[len++] = digits[--n];
+        out[len] = 0;
+        return len;
+    }
+    WORD slot = atom - 0xC000;
+    if (slot >= g_atom_count)
+        return 0;
+    UINT32_K len = 0;
+    while (g_atom_names[slot][len] && len + 1 < capacity) {
+        out[len] = g_atom_names[slot][len];
+        len++;
+    }
+    out[len] = 0;
+    return len;
+}
+
+__declspec(dllexport) UINT32_K GlobalGetAtomNameW(WORD atom, WCHAR *out,
+                                                UINT32_K capacity)
+{
+    return KiAtomNameToWide(atom, out, capacity);
+}
+
+__declspec(dllexport) UINT32_K GetAtomNameW(WORD atom, WCHAR *out,
+                                          UINT32_K capacity)
+{
+    return KiAtomNameToWide(atom, out, capacity);
+}
+
+__declspec(dllexport) UINT32_K GlobalGetAtomNameA(WORD atom, char *out,
+                                                UINT32_K capacity)
+{
+    WCHAR wide[64];
+    UINT32_K len = KiAtomNameToWide(atom, wide, 64);
+    if (!len || !out || !capacity)
+        return 0;
+    if (len >= capacity)
+        len = capacity - 1;
+    for (UINT32_K i = 0; i < len; i++)
+        out[i] = (char)wide[i];
+    out[len] = 0;
+    return len;
+}
+
+__declspec(dllexport) UINT32_K GetAtomNameA(WORD atom, char *out,
+                                          UINT32_K capacity)
+{
+    return GlobalGetAtomNameA(atom, out, capacity);
 }
 
 /* ------------------------------------------------------------------ */

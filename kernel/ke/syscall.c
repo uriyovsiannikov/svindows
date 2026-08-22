@@ -143,6 +143,44 @@ static void KiDumpUserStack(UINT64 rsp)
             KeLog("  [%02lu] %p  %s+0x%lx\n", (unsigned long)i,
                   (void *)value, name, (unsigned long)(value - base));
     }
+
+    /* Frame-pointer chain: with the trap frame unavailable here, reconstruct
+     * the first rbp by scanning for a slot whose value points further up the
+     * same stack and whose own target again points upward; then walk [rbp] /
+     * [rbp+8] pairs for the true caller chain. */
+    UINT64 stack_max = rsp + 0x8000;
+    UINT64 rbp = 0;
+    for (UINT64 va = rsp + 8; va < rsp + 0x400; va += 8) {
+        if (!MmProbeForRead(va, 8) || !MmProbeForRead(*(UINT64 *)va, 8))
+            continue;
+        UINT64 candidate = *(volatile UINT64 *)va;
+        if (candidate <= va || candidate >= stack_max)
+            continue;
+        UINT64 next = *(volatile UINT64 *)candidate;
+        if (next > candidate && next < stack_max) {
+            rbp = candidate;
+            break;
+        }
+    }
+    if (rbp) {
+        KeLog("[user] frame chain:\n");
+        for (int level = 0; level < 12; level++) {
+            if (!MmProbeForRead(rbp + 8, 8))
+                break;
+            UINT64 ret = *(volatile UINT64 *)(rbp + 8);
+            const char *name = 0;
+            UINT64 base = 0;
+            if (ret && LdrDescribeUserAddress(ret, &name, &base))
+                KeLog("  #%d %s+0x%lx\n", level, name,
+                      (unsigned long)(ret - base));
+            if (!MmProbeForRead(rbp, 8))
+                break;
+            UINT64 next = *(volatile UINT64 *)rbp;
+            if (next <= rbp || next >= stack_max)
+                break;
+            rbp = next;
+        }
+    }
 }
 
 /* NtTerminateThread - end the calling thread; does not return. */
@@ -361,24 +399,65 @@ typedef struct _USER_MSG_LOCAL {
 #define WM_RBUTTONDOWN 0x0204
 #define WM_RBUTTONUP   0x0205
 
-static USER_MSG_LOCAL g_user_message_queue[USER_MESSAGE_QUEUE_CAPACITY];
-static UINT32 g_user_message_head;
-static UINT32 g_user_message_tail;
-static UINT64 g_user_active_hwnd;
-static UINT8 g_user_mouse_buttons;
+/*
+ * Per-thread posted-message queues. Real USER owns a queue per GUI thread;
+ * cross-thread hand-offs (explorer's desktop bootstrap posts to the creating
+ * thread) only work if the posted message cannot be consumed by another
+ * thread's GetMessage. Threads are few, so queues are keyed by thread id.
+ */
+#define USER_MESSAGE_QUEUE_CAPACITY 64
+#define USER_MAX_THREAD_QUEUES 64
+
+typedef struct _USER_MSG_QUEUE {
+    USER_MSG_LOCAL Msgs[USER_MESSAGE_QUEUE_CAPACITY];
+    UINT32 Head;
+    UINT32 Tail;
+} USER_MSG_QUEUE;
+
+static USER_MSG_QUEUE g_user_thread_queues[USER_MAX_THREAD_QUEUES];
+
+static USER_MSG_QUEUE *KiUserQueueForThread(UINT32 thread_id)
+{
+    if (!thread_id || thread_id > USER_MAX_THREAD_QUEUES)
+        return NULL;
+    return &g_user_thread_queues[thread_id - 1];
+}
+
+/* Owner thread of each created window slot: input goes to the queue of the
+ * thread that created the window, as in win32k. */
+static UINT32 g_window_owner[256];
+
+static UINT32 KiUserWindowOwner(UINT64 hwnd)
+{
+    UINT16 slot = (UINT16)(hwnd & 0xFFFF);
+    if (!slot || slot >= 256)
+        return 0;
+    return g_window_owner[slot];
+}
 
 static BOOLEAN KiUserEnqueueMessage(UINT64 hwnd, UINT32 message,
                                     UINT64 wparam, INT64 lparam,
                                     INT32 x, INT32 y)
 {
+    /* A posted message is delivered to its window's owner thread; a thread
+     * message (hwnd == 0) goes to the posting thread's own target queue via
+     * KiUserEnqueueThreadMessage. */
+    UINT32 tid = hwnd ? KiUserWindowOwner(hwnd) : 0;
+    if (!tid) {
+        PKTHREAD thread = KeGetCurrentThread();
+        tid = thread ? thread->ThreadId : 0;
+    }
+    USER_MSG_QUEUE *queue = KiUserQueueForThread(tid);
+    if (!queue)
+        return FALSE;
     UINT64 flags = KiIrqSave();
-    UINT32 next = (g_user_message_head + 1) % USER_MESSAGE_QUEUE_CAPACITY;
-    if (next == g_user_message_tail) {
+    UINT32 next = (queue->Head + 1) % USER_MESSAGE_QUEUE_CAPACITY;
+    if (next == queue->Tail) {
         KiIrqRestore(flags);
         return FALSE;
     }
 
-    USER_MSG_LOCAL *msg = &g_user_message_queue[g_user_message_head];
+    USER_MSG_LOCAL *msg = &queue->Msgs[queue->Head];
     memset(msg, 0, sizeof(*msg));
     msg->Hwnd = hwnd;
     msg->Message = message;
@@ -387,10 +466,36 @@ static BOOLEAN KiUserEnqueueMessage(UINT64 hwnd, UINT32 message,
     msg->Time = (UINT32)(KeGetTickCount() * 10);
     msg->PtX = x;
     msg->PtY = y;
-    g_user_message_head = next;
+    queue->Head = next;
     KiIrqRestore(flags);
     return TRUE;
 }
+
+static BOOLEAN KiUserEnqueueThreadMessage(UINT32 target_tid, UINT32 message,
+                                          UINT64 wparam, INT64 lparam)
+{
+    USER_MSG_QUEUE *queue = KiUserQueueForThread(target_tid);
+    if (!queue)
+        return FALSE;
+    UINT64 flags = KiIrqSave();
+    UINT32 next = (queue->Head + 1) % USER_MESSAGE_QUEUE_CAPACITY;
+    if (next == queue->Tail) {
+        KiIrqRestore(flags);
+        return FALSE;
+    }
+    USER_MSG_LOCAL *msg = &queue->Msgs[queue->Head];
+    memset(msg, 0, sizeof(*msg));
+    msg->Message = message;
+    msg->WParam = wparam;
+    msg->LParam = lparam;
+    msg->Time = (UINT32)(KeGetTickCount() * 10);
+    queue->Head = next;
+    KiIrqRestore(flags);
+    return TRUE;
+}
+
+static UINT64 g_user_active_hwnd;
+static UINT8 g_user_mouse_buttons;
 
 void KiUserQueueCharacter(UINT16 character)
 {
@@ -424,15 +529,19 @@ void KiUserQueueMouse(INT32 x, INT32 y, UINT8 buttons)
 
 static BOOLEAN KiUserTakeMessage(USER_MSG_LOCAL *out, BOOLEAN remove)
 {
+    PKTHREAD thread = KeGetCurrentThread();
+    USER_MSG_QUEUE *queue =
+        KiUserQueueForThread(thread ? thread->ThreadId : 0);
+    if (!queue)
+        return FALSE;
     UINT64 flags = KiIrqSave();
-    if (g_user_message_tail == g_user_message_head) {
+    if (queue->Tail == queue->Head) {
         KiIrqRestore(flags);
         return FALSE;
     }
-    *out = g_user_message_queue[g_user_message_tail];
+    *out = queue->Msgs[queue->Tail];
     if (remove)
-        g_user_message_tail =
-            (g_user_message_tail + 1) % USER_MESSAGE_QUEUE_CAPACITY;
+        queue->Tail = (queue->Tail + 1) % USER_MESSAGE_QUEUE_CAPACITY;
     KiIrqRestore(flags);
     return TRUE;
 }
@@ -536,10 +645,11 @@ static UINT64 NtUserPostThreadMessage(UINT64 *a)
     KeLog("[user] NtUserPostThreadMessage(tid=%u, msg=0x%x, wp=%p, lp=%p)\n",
           thread_id, message, (void *)a[2], (void *)a[3]);
 
-    /* All GUI threads currently share one process queue. Preserve thread
-     * message semantics with HWND=NULL; per-thread queue ownership will split
-     * this ring once multiple persistent UI threads are present. */
-    return KiUserEnqueueMessage(0, message, a[2], (INT64)a[3], 0, 0);
+    /* The message is delivered to the target thread's own queue; only that
+     * thread's GetMessage/PeekMessage can consume it, preserving per-thread
+     * message semantics for explorer's desktop hand-off. */
+    return KiUserEnqueueThreadMessage(thread_id, message, a[2],
+                                      (INT64)a[3]);
 }
 
 static UINT64 NtUserCallOneParam(UINT64 *a)
@@ -973,6 +1083,9 @@ static UINT64 NtUserCreateWindowEx(UINT64 *a)
     entries[index].Flags = 0;
     entries[index].Generation = generation;
 
+    PKTHREAD creator = KeGetCurrentThread();
+    g_window_owner[index] = creator ? creator->ThreadId : 0;
+
     /* Do not focus Explorer's zero-sized hidden coordination window. Hardware
      * input remains a thread message until USER creates a visible top-level
      * window and establishes foreground/focus state. */
@@ -986,6 +1099,12 @@ static UINT64 NtUserCreateWindowEx(UINT64 *a)
 
 static UINT64 NtUserDestroyWindow(UINT64 *a)
 {
+    UINT16 slot = (UINT16)(a[0] & 0xFFFF);
+    if (slot && slot < 256) {
+        g_window_owner[slot] = 0;
+        if (g_user_active_hwnd == a[0])
+            g_user_active_hwnd = 0;
+    }
     return 0;
 }
 

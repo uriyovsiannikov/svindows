@@ -152,6 +152,12 @@ $(MSVCRT): user/msvcrt.c $(KERNEL32)
 	$(CLANGWIN) -c user/msvcrt.c -o $(BUILD)/msvcrt.obj
 	$(LLDLINK) /dll /noentry /machine:x64 /nodefaultlib /base:0x1E0000000 \
 	           /out:$(MSVCRT) /implib:$(MSVCRTLIB) \
+	           /export:??0exception@@QEAA@XZ=msvcrt_exception_ctor0 \
+	           "/export:??0exception@@QEAA@AEBQEBD@Z=msvcrt_exception_ctor_msg" \
+	           "/export:??0exception@@QEAA@AEBQEBDH@Z=msvcrt_exception_ctor_msg" \
+	           "/export:??0exception@@QEAA@AEBV0@@Z=msvcrt_exception_ctor_copy" \
+	           /export:??1exception@@UEAA@XZ=msvcrt_exception_dtor \
+	           "/export:?what@exception@@UEBAPEBDXZ=msvcrt_exception_what" \
 	           $(BUILD)/msvcrt.obj $(KERNEL32LIB)
 	@echo "  DLL   $(MSVCRT)"
 
