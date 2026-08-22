@@ -20,20 +20,35 @@
  * @stack_base: lowest address of the user stack (TEB StackLimit).
  * @stack_top:  top of the user stack (TEB StackBase, initial RSP).
  */
-PKTHREAD PsCreateUserProcess(const char *name, UINT64 entry, UINT64 image_base,
-                             UINT64 stack_base, UINT64 stack_top);
+PKTHREAD PsCreateUserProcess(const char *name, const char *command_line,
+                             UINT64 entry, UINT64 image_base,
+                             UINT64 stack_base, UINT64 stack_top,
+                             UINT64 start_argument);
 
 /* The (single) user process's PEB virtual address, shared by its threads. */
 #define PROCESS_PEB_VA 0x0000000000061000ULL
-#define PROCESS_MAIN_TEB_VA 0x0000000000060000ULL
+#define PROCESS_MAIN_TEB_VA 0x0000000000050000ULL
+#define PROCESS_TEB_SIZE    0x0000000000002000ULL
 
 /* User region for the loader's module list (PEB_LDR_DATA + module entries +
- * name buffers), which PEB.Ldr points into. Two pages, below the image. */
+ * name buffers), which PEB.Ldr points into. Six pages, below the process
+ * parameters, are enough for the real Explorer dependency graph. */
 #define PROCESS_LDR_VA 0x0000000000062000ULL
-#define PROCESS_LDR_SIZE 0x2000ULL
+#define PROCESS_LDR_SIZE 0x6000ULL
 
 /* User page for RTL_USER_PROCESS_PARAMETERS (command line, image path). */
 #define PROCESS_PARAMS_VA 0x0000000000068000ULL
+
+/* The native GDI client indexes this table directly through PEB+0xF8. Each
+ * GDI handle entry is 24 bytes and the handle index is 16 bits. */
+#define PROCESS_GDI_SHARED_TABLE_VA   0x0000000001000000ULL
+#define PROCESS_GDI_SHARED_TABLE_SIZE (0x10000ULL * 24ULL)
+
+/* USER32's SHAREDINFO points at a parallel 16-bit handle table. */
+#define PROCESS_USER_SHARED_TABLE_VA   0x0000000001180000ULL
+#define PROCESS_USER_SHARED_TABLE_SIZE (0x10000ULL * 24ULL)
+#define PROCESS_USER_OBJECT_ARENA_VA   0x0000000001300000ULL
+#define PROCESS_USER_OBJECT_ARENA_SIZE 0x0000000000010000ULL
 
 /* Register the Event and Thread object types. Requires Ob. */
 void PsInitialize(void);
@@ -50,6 +65,11 @@ void PsInitialize(void);
 UINT64 NtCreateEvent(UINT64 *args);
 UINT64 NtSetEvent(UINT64 *args);
 UINT64 NtWaitForSingleObject(UINT64 *args);
+UINT64 NtWaitForMultipleObjects(UINT64 *args);
+UINT64 NtResetEvent(UINT64 *args);
+UINT64 NtCreateSemaphore(UINT64 *args);
+UINT64 NtReleaseSemaphore(UINT64 *args);
+UINT64 NtQueryInformationProcess(UINT64 *args);
 UINT64 NtCreateThreadEx(UINT64 *args);
 
 #endif /* _NTOS_PS_H_ */

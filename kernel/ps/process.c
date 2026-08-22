@@ -26,13 +26,39 @@ static void *map_user_rw(UINT64 va)
     return (void *)va;
 }
 
-PKTHREAD PsCreateUserProcess(const char *name, UINT64 entry, UINT64 image_base,
-                             UINT64 stack_base, UINT64 stack_top)
+PKTHREAD PsCreateUserProcess(const char *name, const char *command_line,
+                             UINT64 entry, UINT64 image_base,
+                             UINT64 stack_base, UINT64 stack_top,
+                             UINT64 start_argument)
 {
     /* PEB: what the image is and where it loaded. */
     PPEB peb = map_user_rw(USER_PEB_VA);
     memset(peb, 0, sizeof(*peb));
     peb->ImageBaseAddress = (PVOID)image_base;
+
+    /* GDI32 validates kernel GDI handles through the shared handle table at
+     * PEB+0xF8. Map the complete 16-bit table now; entries remain empty until
+     * win32k creates actual brushes, fonts, surfaces, and DCs. */
+    for (UINT64 off = 0; off < PROCESS_GDI_SHARED_TABLE_SIZE;
+         off += PAGE_SIZE) {
+        void *page = map_user_rw(PROCESS_GDI_SHARED_TABLE_VA + off);
+        memset(page, 0, PAGE_SIZE);
+    }
+    peb->GdiSharedHandleTable = (PVOID)PROCESS_GDI_SHARED_TABLE_VA;
+
+    /* USER32 validates HWND values through SHAREDINFO.aheList without entering
+     * the kernel. Keep the native 24-byte HANDLEENTRY array and initial shared
+     * window-object arena mapped at the addresses published by ntdll. */
+    for (UINT64 off = 0; off < PROCESS_USER_SHARED_TABLE_SIZE;
+         off += PAGE_SIZE) {
+        void *page = map_user_rw(PROCESS_USER_SHARED_TABLE_VA + off);
+        memset(page, 0, PAGE_SIZE);
+    }
+    for (UINT64 off = 0; off < PROCESS_USER_OBJECT_ARENA_SIZE;
+         off += PAGE_SIZE) {
+        void *page = map_user_rw(PROCESS_USER_OBJECT_ARENA_VA + off);
+        memset(page, 0, PAGE_SIZE);
+    }
 
     /* Loader module list, so ring-3 code can enumerate loaded modules. */
     for (UINT64 off = 0; off < PROCESS_LDR_SIZE; off += PAGE_SIZE)
@@ -44,21 +70,30 @@ PKTHREAD PsCreateUserProcess(const char *name, UINT64 entry, UINT64 image_base,
      * works. The wide strings live past the struct in the same page. */
     UINT8 *params = map_user_rw(PROCESS_PARAMS_VA);
     memset(params, 0, PAGE_SIZE);
-    UINT16 *cmdw = (UINT16 *)(params + 0x200);
-    UINT16 n = 0;
-    for (; name[n] && n < 200; n++)
-        cmdw[n] = (UINT16)(UCHAR)name[n];
-    cmdw[n] = 0;
-    for (int off = 0x60; off <= 0x70; off += 0x10) { /* ImagePathName, CommandLine */
-        *(UINT16 *)(params + off + 0) = (UINT16)(n * 2);       /* Length        */
-        *(UINT16 *)(params + off + 2) = (UINT16)(n * 2 + 2);   /* MaximumLength  */
-        *(void **)(params + off + 8) = cmdw;                   /* Buffer         */
-    }
+    UINT16 *imagew = (UINT16 *)(params + 0x200);
+    UINT16 image_n = 0;
+    for (; name[image_n] && image_n < 200; image_n++)
+        imagew[image_n] = (UINT16)(UCHAR)name[image_n];
+    imagew[image_n] = 0;
+    *(UINT16 *)(params + 0x60) = (UINT16)(image_n * 2);
+    *(UINT16 *)(params + 0x62) = (UINT16)(image_n * 2 + 2);
+    *(void **)(params + 0x68) = imagew;
+
+    UINT16 *cmdw = (UINT16 *)(params + 0x400);
+    UINT16 cmd_n = 0;
+    for (; command_line[cmd_n] && cmd_n < 500; cmd_n++)
+        cmdw[cmd_n] = (UINT16)(UCHAR)command_line[cmd_n];
+    cmdw[cmd_n] = 0;
+    *(UINT16 *)(params + 0x70) = (UINT16)(cmd_n * 2);
+    *(UINT16 *)(params + 0x72) = (UINT16)(cmd_n * 2 + 2);
+    *(void **)(params + 0x78) = cmdw;
     peb->ProcessParameters = params;
 
     /* TEB: the per-thread block GS resolves to in ring 3. */
-    PTEB teb = map_user_rw(USER_TEB_VA);
-    memset(teb, 0, sizeof(*teb));
+    for (UINT64 off = 0; off < PROCESS_TEB_SIZE; off += PAGE_SIZE)
+        map_user_rw(USER_TEB_VA + off);
+    PTEB teb = (PTEB)USER_TEB_VA;
+    memset(teb, 0, PROCESS_TEB_SIZE);
     teb->NtTib.Self = (struct _NT_TIB *)USER_TEB_VA;
     teb->NtTib.StackBase = (PVOID)stack_top;
     teb->NtTib.StackLimit = (PVOID)stack_base;
@@ -69,5 +104,6 @@ PKTHREAD PsCreateUserProcess(const char *name, UINT64 entry, UINT64 image_base,
     KeLog("[ps]   process '%s': PEB @ %p (ImageBase %p), TEB @ %p\n",
           name, (void *)USER_PEB_VA, (void *)image_base, (void *)USER_TEB_VA);
 
-    return KeCreateUserThread(name, entry, stack_top, USER_TEB_VA, 0, 8);
+    return KeCreateUserThread(name, entry, stack_top, USER_TEB_VA,
+                              start_argument, 8);
 }

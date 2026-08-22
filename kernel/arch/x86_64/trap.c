@@ -2,14 +2,16 @@
  * arch/x86_64/trap.c - the C trap dispatcher.
  *
  * Called by the common assembly stub with a fully populated KTRAP_FRAME. For
- * now every CPU exception (vector < 32) is fatal: we dump the frame and bring
- * the system down through KeBugCheck. Device interrupts (>= 32) are not enabled
- * yet, so anything landing here is unexpected and merely reported.
+ * Kernel-mode CPU exceptions remain fatal. A fault whose saved CS is ring 3,
+ * however, belongs to the current process: dump it for diagnostics and
+ * terminate only that user thread, just as NT turns an unhandled user exception
+ * into process/thread teardown rather than a kernel bugcheck.
  */
 #include <nt/ntdef.h>
 #include <ntos/ke.h>
 #include <ntos/hal.h>
 #include <ntos/mm.h>
+#include <ntos/ldr.h>
 
 static const char *const g_exception_names[32] = {
     "#DE Divide-by-Zero",
@@ -83,6 +85,25 @@ static void dump_frame(PKTRAP_FRAME f)
         KeLog("stack@RSP: %p %p %p %p\n",
               (void *)sp[0], (void *)sp[1], (void *)sp[2], (void *)sp[3]);
     }
+
+    /* Annotate the user stack: values landing inside loaded module images are
+     * return addresses, giving an exit/fault backtrace without full unwind
+     * support. */
+    if ((f->cs & 3) == 3 && f->rsp && MmIsUserAddress(f->rsp)) {
+        KeLog("[user] stack walk:\n");
+        for (UINT64 i = 0; i < 64; i++) {
+            UINT64 va = f->rsp + i * 8;
+            if (!MmProbeForRead(va, sizeof(UINT64)))
+                break;
+            UINT64 value = *(volatile UINT64 *)va;
+            const char *name = NULL;
+            UINT64 base = 0;
+            if (value && LdrDescribeUserAddress(value, &name, &base))
+                KeLog("  [%02lu] %p  %s+0x%lx\n", (unsigned long)i,
+                      (void *)value, name,
+                      (unsigned long)(value - base));
+        }
+    }
 }
 
 void KiDispatchTrap(PKTRAP_FRAME frame)
@@ -94,9 +115,23 @@ void KiDispatchTrap(PKTRAP_FRAME frame)
         return;
     }
 
-    /* CPU exceptions are fatal for now: dump and bugcheck. */
+    /* Never let a bad or incomplete Win32 component take down the kernel. We
+     * do not have user-mode SEH dispatch yet, so an unhandled ring-3 exception
+     * terminates the faulting thread after preserving a full diagnostic dump. */
     if (frame->vector < 32) {
         dump_frame(frame);
+        if ((frame->cs & 3) == 3) {
+            const UINT64 cfg_trace_va = 0x0000000000088ff8ULL;
+            if (MmProbeForRead(cfg_trace_va, sizeof(UINT64)))
+                KeLog("[user] last CFG indirect target: %p\n",
+                      (void *)*(volatile UINT64 *)cfg_trace_va);
+            PKTHREAD thread = KeGetCurrentThread();
+            KeLog("[user] unhandled exception in thread '%s' (id %u); "
+                  "terminating thread only\n",
+                  thread && thread->Name ? thread->Name : "?",
+                  thread ? thread->ThreadId : 0);
+            KeTerminateThread();
+        }
         KeBugCheck(KE_UNEXPECTED_KERNEL_MODE_TRAP,
                    "Unhandled CPU exception in kernel mode");
     }

@@ -17,13 +17,14 @@
  * @filename:  name of the executable in the filesystem root (8.3).
  * @entry_out: receives the user virtual address of the entry point.
  * @base_out:  (optional) receives the load base.
+ * @arg_out:   receives the bootstrap argument passed in RCX.
  *
  * The image is mapped at its preferred base, its imports are resolved (loading
  * dependency DLLs such as ntdll from disk on demand and patching the IAT), and
  * per-section page permissions are applied.
  */
 NTSTATUS LdrLoadExecutable(const char *filename, UINT64 *entry_out,
-                           UINT64 *base_out);
+                           UINT64 *base_out, UINT64 *arg_out);
 
 /* Resolve an exported routine's address in a loaded module. */
 UINT64 LdrGetProcAddress(UINT64 module_base, const char *name);
@@ -40,5 +41,10 @@ void LdrBuildProcessModuleList(struct _PEB *peb, UINT64 ldr_va, UINT64 ldr_size)
 /* Load a DLL by name at runtime and link it into PEB->Ldr; returns the load
  * base (0 on failure). Backs kernel32's LoadLibraryA. */
 UINT64 LdrLoadLibrary(const char *name);
+
+/* If @addr falls inside a loaded module's image, report the module's cache
+ * name and base (for user-stack symbolization in diagnostics). */
+BOOLEAN LdrDescribeUserAddress(UINT64 addr, const char **name_out,
+                               UINT64 *base_out);
 
 #endif /* _NTOS_LDR_H_ */

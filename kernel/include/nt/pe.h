@@ -19,6 +19,8 @@
 #define IMAGE_DIRECTORY_ENTRY_EXPORT     0
 #define IMAGE_DIRECTORY_ENTRY_IMPORT     1
 #define IMAGE_DIRECTORY_ENTRY_BASERELOC  5
+#define IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG 10
+#define IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT 13
 
 #define IMAGE_ORDINAL_FLAG64 0x8000000000000000ULL
 
@@ -141,6 +143,19 @@ typedef struct PACKED _IMAGE_IMPORT_BY_NAME {
     UINT16 Hint;
     CHAR   Name[1]; /* NUL-terminated */
 } IMAGE_IMPORT_BY_NAME, *PIMAGE_IMPORT_BY_NAME;
+
+/* Delay-load directory.  With Attributes bit 0 set (the format emitted by
+ * current MSVC), every address field below is an RVA. */
+typedef struct PACKED _IMAGE_DELAYLOAD_DESCRIPTOR {
+    UINT32 Attributes;
+    UINT32 DllNameRva;
+    UINT32 ModuleHandleRva;
+    UINT32 ImportAddressTableRva;
+    UINT32 ImportNameTableRva;
+    UINT32 BoundImportAddressTableRva;
+    UINT32 UnloadInformationTableRva;
+    UINT32 TimeDateStamp;
+} IMAGE_DELAYLOAD_DESCRIPTOR, *PIMAGE_DELAYLOAD_DESCRIPTOR;
 
 /* --- Exports --- */
 

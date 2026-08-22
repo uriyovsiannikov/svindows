@@ -67,18 +67,18 @@ The kernel currently:
   syscalls), and the loader resolves the full `app.exe → kernel32.dll →
   ntdll.dll → syscall` chain off the disk. All three are real PEs built by the
   standard toolchain (`clang --target=x86_64-pc-windows-msvc` + `lld-link`).
-- **Draws a graphical desktop.** Requests a 32-bpp **linear framebuffer** from
-  GRUB via Multiboot2, maps it into the direct map, and provides graphics
-  primitives (pixels, filled rectangles, an 8×16 bitmap font). The kernel
-  composes a simple desktop — a title bar, a scrolling text console, and a
-  taskbar — and the kernel log is rendered on-screen (in addition to serial),
-  which is the first visible step toward a GUI shell.
+- **Owns a 32-bpp linear framebuffer without faking a shell.** GRUB supplies the
+  framebuffer, the kernel maps it and retains low-level pixel/rectangle/font
+  primitives, but the old kernel-drawn wallpaper, console window and taskbar
+  have been removed. The framebuffer starts blank and is reserved for the
+  Windows-compatible USER/GDI stack and `explorer.exe`; diagnostics stay on
+  serial/VGA.
 - **Reads keyboard and mouse.** A **PS/2 keyboard** driver (IRQ1) translates
   scancodes to ASCII into a ring buffer, and a **PS/2 mouse** driver (IRQ12)
   decodes movement packets into a screen-clamped cursor position. A live input
-  thread echoes typed characters and draws an arrow **mouse cursor** that
-  follows the mouse, saving and restoring the pixels underneath it (and hiding
-  itself while the console draws) so the desktop stays intact.
+  thread drains keyboard input and draws an arrow **mouse cursor** that follows
+  the mouse, saving and restoring the pixels underneath it. This remains a
+  low-level input/display primitive, not a kernel-owned desktop shell.
 - **Runs a Windows dynamic runtime.** The kernel loader builds a real
   **`PEB->Ldr` module list** (`LDR_DATA_TABLE_ENTRY` per loaded module, with the
   Windows x64 field layout), and kernel32 implements **`GetModuleHandleA`**
@@ -149,6 +149,23 @@ The kernel currently:
   log is the exact to-do list a real binary needs — the same load-and-report
   loop Wine/ReactOS use to bootstrap toward running unmodified binaries. (Tested
   with an import lib that promises a `kernel32` export the DLL doesn't have.)
+- **Runs an unmodified Windows 11 inbox binary.** A stock x64
+  `C:\Windows\System32\hostname.exe` loads from FAT, resolves modern
+  `api-ms-win-core-*` contracts into the NTOS `kernel32`, starts through its
+  real legacy MSVCRT startup, calls the minimal `ws2_32`, prints `NTOS`, and
+  exits normally. Select an external root-level PE with
+  `make run PROGRAM=HOSTNAME.EXE`.
+- **Provides Win32 TLS with real thread identity.** Created threads receive a
+  distinct `TEB->ClientId.UniqueThread`, and `TlsAlloc`/`TlsFree`/
+  `TlsGetValue`/`TlsSetValue` store isolated values through each TEB. This
+  removes two assumptions used heavily by Explorer and user-mode runtimes.
+- **Has timed multi-object waits and bounded thread-pool execution.** Dispatcher
+  waits support wait-any/wait-all, polling and clock-driven timeouts across
+  events, semaphores and threads. Kernel32 exposes the corresponding Win32
+  waits/event/semaphore APIs, runs work on four persistent workers, and watches
+  thread-pool wait objects through one shared monitor rather than continuously
+  creating short-lived threads. Unhandled ring-3 faults now terminate only the
+  offending user thread instead of bugchecking the kernel.
 
 See [`docs/ROADMAP.md`](docs/ROADMAP.md) for what comes next (physical/virtual
 memory manager, object manager, threads & scheduler, system-call boundary, and

@@ -27,11 +27,22 @@ BOOLEAN AtaReadSectors(UINT32 lba, UINT8 count, void *buffer);
 
 NTSTATUS FatMount(void);
 
-/*
- * FatLoadFile - read a file from the root directory into a freshly allocated
- * pool buffer. The caller frees *out_buffer with ExFreePool.
- */
-NTSTATUS FatLoadFile(const char *name, void **out_buffer, SIZE_T *out_size);
+typedef struct _FAT_FIND_DATA {
+    char   Name[260];
+    UINT32 Size;
+    UINT32 Attributes;
+    UINT16 WriteDate;
+    UINT16 WriteTime;
+} FAT_FIND_DATA;
+
+/* Read a root file into a freshly allocated pool buffer. When supplied,
+ * out_info receives the directory metadata used to create its File object. */
+NTSTATUS FatLoadFile(const char *name, void **out_buffer, SIZE_T *out_size,
+                     FAT_FIND_DATA *out_info);
+
+/* Enumerate visible root entries (VFAT long names when present) by zero-based
+ * index. This is the directory-query primitive used by Win32 find. */
+NTSTATUS FatEnumerateRoot(UINT32 index, FAT_FIND_DATA *out);
 
 /* Bring up the I/O subsystem (ATA + mount FAT + I/O objects). */
 NTSTATUS IoInitialize(void);
@@ -52,5 +63,19 @@ UINT64 NtCreateFile(UINT64 *args);
 UINT64 NtReadFile(UINT64 *args);
 UINT64 NtWriteFile(UINT64 *args);
 UINT64 NtClose(UINT64 *args);
+UINT64 NtEnumerateRootFiles(UINT64 *args); /* private NTOS loader/runtime hook */
+
+typedef struct _NTOS_FILE_INFO {
+    UINT64 Size;
+    UINT64 Position;
+    UINT32 Attributes;
+    UINT32 IsConsole;
+    UINT16 FatWriteDate;
+    UINT16 FatWriteTime;
+    UINT32 Reserved;
+} NTOS_FILE_INFO;
+
+UINT64 NtQueryFileInfo(UINT64 *args); /* private NTOS loader/runtime hook */
+UINT64 NtSetFilePosition(UINT64 *args); /* private NTOS loader/runtime hook */
 
 #endif /* _NTOS_IO_H_ */

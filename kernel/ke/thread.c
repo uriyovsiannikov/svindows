@@ -13,6 +13,7 @@
 #include <ntos/ke.h>
 #include <ntos/ex.h>
 #include <ntos/rtl.h>
+#include <nt/peb.h>
 
 #define DEFAULT_QUANTUM 2   /* timer ticks per scheduling slice */
 #define THREAD_STACK_SIZE 0x4000 /* 16 KiB kernel stack per thread */
@@ -136,6 +137,14 @@ PKTHREAD KeCreateUserThread(const char *name, UINT64 user_entry,
     t->UserStack = user_stack;
     t->UserGsBase = user_gs_base;
     t->UserArg = user_arg;
+
+    /* Ps builds the TEB before Ke allocates the KTHREAD, so this is the first
+     * point at which the real thread id is known.  Native code reads the id
+     * directly from gs:[0x48]; leaving child TEBs at zero makes every created
+     * thread look identical and breaks owner-based user-mode synchronization. */
+    if (user_gs_base)
+        ((PTEB)user_gs_base)->ClientId.UniqueThread =
+            (HANDLE)(ULONG_PTR)t->ThreadId;
     KepEnqueueThread(t);
 
     KeLog("[ke]   created user thread '%s' (id %u): entry %p, ustack %p, teb %p\n",
@@ -259,6 +268,17 @@ void KeClockTick(void)
 {
     g_tick_count++;
     KeUpdateSharedData(g_tick_count);
+
+    /* Dispatcher timeouts are absolute tick deadlines stored on blocked
+     * threads. The process list is stable while interrupts are disabled. */
+    PLIST_ENTRY head = &g_system_process.ThreadListHead;
+    for (PLIST_ENTRY entry = head->Flink; entry != head; ) {
+        PKTHREAD waiting = CONTAINING_RECORD(entry, KTHREAD, ProcessEntry);
+        entry = entry->Flink;
+        if (waiting->State == ThreadStateWaiting && waiting->WaitDeadline &&
+            g_tick_count >= waiting->WaitDeadline)
+            KiTimeoutThreadWait(waiting);
+    }
 
     PKTHREAD t = g_current_thread;
     if (t->Quantum > 0)

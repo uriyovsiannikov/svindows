@@ -17,6 +17,7 @@
 #define REG_SZ     1
 #define REG_BINARY 3
 #define REG_DWORD  4
+#define REG_EXPAND_SZ 2
 
 /*
  * KEY_VALUE_PARTIAL_INFORMATION - what NtQueryValueKey returns for info class

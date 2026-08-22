@@ -36,7 +36,8 @@ the kernel allocates from.
       top of it arrive with the system-call layer in Phase 4.
 - [x] Object namespace: `Directory` objects, the root `\`, insert-by-name and
       absolute-path lookup (e.g. `\Device\TestEvent`).
-- [ ] Synchronization objects: events, mutexes, semaphores (needs `Ke` waits).
+- [x] Synchronization objects: events, mutants, and counting semaphores over
+      the common dispatcher header and wait lists.
 
 ## Phase 3 — Threads, processes, scheduler (`Ke`, `Ps`) (in progress)
 
@@ -48,8 +49,10 @@ the kernel allocates from.
       DISPATCHER_HEADER, thread blocking/waking, and `KeWaitForSingleObject`.
       Events (notification + auto-reset), semaphores, and mutants share the
       wait/wake machinery; threads are waitable and signal on exit.
+- [x] `KeWaitForMultipleObjects` with wait-any/wait-all signal consumption,
+      poll/infinite/relative/absolute timeouts, and clock-driven wakeup.
 - [ ] Priority-based ordering (the `Priority` field exists but scheduling is
-      currently round-robin); `KeWaitForMultipleObjects` and wait timeouts.
+      currently round-robin).
 - [ ] `ETHREAD` / `EPROCESS` executive wrappers and a terminated-thread reaper.
 - [ ] Kernel-mode threads work today; the user/kernel privilege split is Phase 4.
 
@@ -161,8 +164,21 @@ the kernel allocates from.
       don't provide yet **loads anyway** — the loader logs each missing import
       and points the IAT at a return-0 stub (the load-and-report loop that
       bootstraps toward unmodified binaries).
-- [ ] Keep growing toward *unmodified, ready-made* Windows binaries: TLS
-      (`TlsAlloc`/`TlsGetValue`, TEB slots) + the PE TLS directory and callbacks,
+- [x] Run a stock, unmodified Windows 11 x64 console binary: `hostname.exe`
+      resolves its API-set imports, enters through the Microsoft CRT startup,
+      calls the NTOS Winsock facade, prints `NTOS`, and exits normally.
+- [x] Win32 thread-local storage (`TlsAlloc`/`TlsFree`/`TlsGetValue`/
+      `TlsSetValue`) backed by each thread's TEB, with real per-thread IDs in
+      child TEBs so owner-based synchronization and TLS remain isolated.
+- [x] A usable Win32 dispatcher/thread-pool base: timed single and multiple
+      waits, events (`SetEvent`/`ResetEvent`), semaphores, a bounded persistent
+      four-worker work queue, and one shared monitor for thread-pool waits
+      instead of allocating a new OS thread for every wait arm.
+- [x] Ring-3 faults no longer bugcheck the operating system. Until user-mode
+      SEH is implemented, the trap dispatcher records the complete fault and
+      terminates only the offending user thread; kernel faults remain fatal.
+- [ ] Keep growing toward *unmodified, ready-made* Windows binaries: the PE TLS
+      directory and callbacks (plus static TEB TLS slots/expansion slots),
       a fuller CRT/`msvcrt`, load-config (security cookie) handling, kernel SEH
       (`.pdata`/`RUNTIME_FUNCTION`) so exceptions and fault-safe probes work, and
       eventually `user32`/`gdi32` for GUI programs — the ReactOS/Wine-scale
@@ -179,13 +195,37 @@ bottom of the graphics stack and builds up.
       into the kernel direct map.
 - [x] **Graphics primitives**: put-pixel, filled rectangles, screen clear, and
       an 8×16 **bitmap font** with glyph and string drawing.
-- [x] A **framebuffer text console** (scrolling) that the kernel log renders
-      into, and a composed **desktop** (title bar + console area + taskbar).
-      Verified by capturing a QEMU screendump over QMP.
+- [x] The early framebuffer console and mock desktop were useful bring-up
+      milestones and were verified in QEMU, then deliberately removed from the
+      boot path. The framebuffer now starts blank: only USER/GDI and
+      `explorer.exe` are allowed to become the visible desktop.
 - [x] A **PS/2 keyboard** (IRQ1, scancode→ASCII ring buffer) and **PS/2 mouse**
       (IRQ12, movement packets) input stack, with a software **mouse cursor**
-      that follows the mouse (save/restore under the sprite, hidden while the
-      console draws so scrolling can't smear it).
+      that follows the mouse (save/restore under the sprite).
+- [x] **The stock Windows 10/11 `explorer.exe` boots and initializes as the
+      shell.** It resolves its ~950 imports across 60 DLLs (the inbox USER32,
+      GDI32, SHELL32, SHCORE, combase, DWrite, dwmapi, ... from `win/` plus
+      NTOS kernel32/advapi32/msvcrt), runs all 27 DLL entry points, decides it
+      *is* the registered shell (`HKLM\...\Winlogon\AlternateShells\
+      AvailableShells`), initializes the accent-color palette (reading and
+      writing real registry keys), writes `StartMenuInit`, spawns its worker
+      threads, and only then stops at the desktop-thread bootstrap hand-off.
+      Supporting work done along the way: `NtdllDefWindowProc_W/A` (USER32's
+      forwarded DefWindowProc), ~60 new kernel32 exports (PE resources,
+      Global/Local memory, Fls*, code pages, file mappings, VirtualQuery,
+      timer queues...), advapi32 SID/token APIs and Reg*W variants, a
+      kernel-side win32k service layer keyed by the *real* win32u.dll syscall
+      numbers extracted from the binary itself (window classes + atoms,
+      properties, window longs, post/show/setwindowpos/timers, desktop and
+      window-station stubs) with a return-0 fallback for unimplemented ones,
+      sign-extended-HKEY handling in advapi32, GetNativeSystemInfo reporting
+      PROCESSOR_ARCHITECTURE_AMD64 (dwmapi requires it before wiring its
+      function table), and user-stack symbolization in trap/terminate dumps.
+- [ ] The remaining explorer blocker: its desktop-thread bootstrap waits for a
+      hand-off flag that the shell's message-window infrastructure must set;
+      needs CreateWindowExW-driven message windows driven end-to-end by the
+      kernel USER layer (class registration → window → posted messages),
+      which is the next milestone toward a visible desktop.
 - [ ] A window/compositor model (drawing windows, z-order, dirty rectangles).
 - [ ] `win32k`-style kernel graphics + a `gdi32`/`user32` surface so Win32 GUI
       programs can create windows and paint — the bridge from console programs

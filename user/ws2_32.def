@@ -1,0 +1,4 @@
+LIBRARY ws2_32.dll
+EXPORTS
+    WSAStartup @115
+    GetHostNameW

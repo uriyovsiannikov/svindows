@@ -106,7 +106,6 @@ void HalVgaClear(void);
 /* ------------------------------------------------------------------ */
 
 void HalInitializeConsole(void);
-void HalConsoleUseFramebuffer(void);
 void HalConsolePutChar(char c);
 void HalConsoleWrite(const char *s);
 

@@ -156,11 +156,11 @@ the framebuffer (which lives above RAM) into the direct map, and the graphics
 primitives — put-pixel, filled rectangle, screen clear, and an 8×16 bitmap font
 (`hal/font8x16.c`, generated from a monospace TTF) — draw straight into it.
 
-A scrolling **framebuffer text console** sits on top of the primitives, and
-`ke/ke_main.c` composes a simple **desktop**: a title bar, the console area, and
-a taskbar. Once graphics are up, `HalConsolePutChar` (`hal/console.c`) fans the
-kernel log out to the serial port *and* the framebuffer console, so boot output
-appears on screen.
+The earlier scrolling framebuffer console and kernel-composed mock desktop were
+removed after graphics bring-up was validated. `ke/ke_main.c` now clears the
+framebuffer and leaves it unowned so the Windows-compatible USER/GDI stack can
+be the only producer of visible windows and, eventually, the Explorer desktop.
+Kernel diagnostics remain on serial and the early VGA text backend.
 
 ## Input and the cursor
 
@@ -171,16 +171,11 @@ drains. The mouse driver (`hal/mouse.c`) reassembles the 3-byte movement
 packets into a screen-clamped `MouseState` (position + buttons), bumping a
 sequence counter on each change.
 
-A kernel **input thread** (`InputWorker` in `ke/ke_main.c`) is the desktop's
-live input loop: it echoes typed characters and, when the mouse sequence
-changes, moves the arrow **cursor**. `GfxMoveCursor` (`hal/framebuffer.c`) saves
-the pixels under the sprite and restores them on the next move. Because the
-cursor is a software overlay, any console drawing must not run while it is
-present: `HalConsolePutChar` lifts the cursor (`GfxHideCursor`) around each
-character and restores it after (`GfxShowCursor`), all with interrupts masked so
-the input thread can't repaint it mid-update. That keeps a console scroll from
-smearing the cursor across the screen. A window/compositor model comes next
-(see the roadmap).
+A kernel **input thread** (`InputWorker` in `ke/ke_main.c`) drains typed input
+and moves the arrow **cursor** when the mouse sequence changes.
+`GfxMoveCursor` (`hal/framebuffer.c`) saves the pixels under the sprite and
+restores them on the next move. A USER/win32k input queue and window compositor
+come next (see the roadmap).
 
 ## The registry
 

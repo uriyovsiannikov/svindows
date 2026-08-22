@@ -79,6 +79,8 @@ typedef struct PACKED _PEB {
     PVOID  ProcessParameters;          /* 0x20 */
     PVOID  SubSystemData;              /* 0x28 */
     PVOID  ProcessHeap;                /* 0x30 */
+    UINT8  PaddingToGdiTable[0xC0];    /* 0x38..0xF7 */
+    PVOID  GdiSharedHandleTable;       /* 0xF8 */
 } PEB, *PPEB;
 
 #endif /* _NT_PEB_H_ */

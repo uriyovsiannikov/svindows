@@ -1,5 +1,13 @@
 LIBRARY ntdll.dll
 EXPORTS
+    LdrInitializeProcess
+    RtlImageNtHeader
+    RtlInitializeNtUserPfn
+    RtlRetrieveNtUserPfn
+    RtlResetNtUserPfn
+    NtdllDefWindowProc_W
+    NtdllDefWindowProc_A
+    CsrClientConnectToServer
     NtDisplayString
     NtDisplayNumber
     NtTerminateThread
@@ -19,3 +27,142 @@ EXPORTS
     NtSetValueKey
     NtQueryValueKey
     NtDelayExecution
+    NtQuerySystemInformation
+    NtEnumerateRootFiles
+    NtQueryFileInfo
+    NtSetFilePosition
+    NtWaitForMultipleObjects
+    NtResetEvent
+    NtCreateSemaphore
+    NtReleaseSemaphore
+    NtQueryInformationProcess
+
+; --- C runtime side of ntdll (user/ntdllrtl.c) ---
+    RtlCreateHeap
+    RtlDestroyHeap
+    RtlAllocateHeap
+    RtlFreeHeap
+    RtlReAllocateHeap
+    RtlSizeHeap
+    RtlFlushHeaps
+    RtlValidateHeap
+    RtlInitializeCriticalSection
+    RtlInitializeCriticalSectionAndSpinCount
+    RtlEnterCriticalSection
+    RtlLeaveCriticalSection
+    RtlTryEnterCriticalSection
+    RtlDeleteCriticalSection
+    RtlInitializeSRWLock
+    RtlAcquireSRWLockExclusive
+    RtlReleaseSRWLockExclusive
+    RtlAcquireSRWLockShared
+    RtlReleaseSRWLockShared
+    RtlInitializeResource
+    RtlDeleteResource
+    RtlAcquireResourceExclusive
+    RtlReleaseResource
+    RtlQueryResourcePolicy
+    RtlInitUnicodeString
+    RtlInitAnsiString
+    RtlFreeUnicodeString
+    RtlCompareUnicodeString
+    RtlEqualUnicodeString
+    RtlAnsiStringToUnicodeString
+    RtlCreateUnicodeStringFromAsciiz
+    RtlMultiByteToUnicodeN
+    RtlMultiByteToUnicodeSize
+    RtlUnicodeToMultiByteN
+    RtlUnicodeToMultiByteSize
+    RtlUnicodeStringToInteger
+    RtlGetIntegerAtom
+    RtlPrefixString
+    RtlLengthRequiredSid
+    wcscmp
+    _wcsicmp
+    _wcsnicmp
+    wcslen
+    wcsncpy_s
+    wcscpy_s
+    wcscat_s
+    wcsncat_s
+    wcsrchr
+    strrchr
+    _stricmp
+    _wtoi
+    wcstol
+    wcstoul
+    _ultow_s
+    isspace
+    iswspace
+    qsort
+    memset
+    memcpy
+    memmove
+    memcmp
+    RtlSetLastWin32Error
+    RtlGetLastWin32Error
+    RtlNtStatusToDosError
+    RtlNtStatusToDosErrorNoTeb
+    RtlIsThreadWithinLoaderCallout
+    RtlPcToFileHeader
+    RtlGetActiveConsoleId
+    RtlGetThreadLangIdByIndex
+    RtlOpenCurrentUser
+    RtlGetNtProductType
+    RtlQueryElevationFlags
+    RtlCheckRegistryKey
+    RtlMapGenericMask
+    RtlRunEncodeUnicodeString
+    RtlRunDecodeUnicodeString
+    RtlRandomEx
+    RtlDllShutdownInProgress
+    RtlGetLastNtStatus
+    RtlFindActivationContextSectionString
+    RtlActivateActivationContextUnsafeFast
+    RtlDeactivateActivationContextUnsafeFast
+    RtlReleaseActivationContext
+    RtlQueryInformationActiveActivationContext
+    LdrQueryImageFileExecutionOptions
+    LdrFlushAlternateResourceModules
+    CsrAllocateCaptureBuffer
+    CsrFreeCaptureBuffer
+    CsrAllocateMessagePointer
+    CsrClientCallServer
+    EtwRegisterTraceGuidsW
+    EtwUnregisterTraceGuids
+    EtwEventRegister
+    EtwEventUnregister
+    EtwEventWrite
+    EtwEventWriteTransfer
+    EtwEventEnabled
+    EtwEventSetInformation
+    EtwGetTraceEnableLevel
+    EtwGetTraceEnableFlags
+    EtwGetTraceLoggerHandle
+    EtwLogTraceEvent
+    EtwTraceMessage
+    NtQueryWnfStateData
+    RtlQueryWnfStateData
+    RtlPublishWnfStateData
+    RtlSubscribeWnfStateChangeNotification
+    RtlUnsubscribeWnfNotificationWaitForCompletion
+    WinSqmAddToStream
+    WinSqmAddToStreamEx
+    WinSqmIncrementDWORD
+    WinSqmSetDWORD
+    ShipAssert
+    RtlCreateEnvironment
+    RtlDestroyEnvironment
+    RtlQueryEnvironmentVariable_U
+    RtlSetEnvironmentVariable
+    RtlSetCurrentEnvironment
+    RtlExpandEnvironmentStrings_U
+    NtVdmControl
+    NlsAnsiCodePage DATA
+
+; Zw* aliases share the syscall stubs with their Nt* counterparts.
+    ZwClose = NtClose
+    ZwOpenKey = NtOpenKey
+    ZwCreateKey = NtCreateKey
+    ZwSetValueKey = NtSetValueKey
+    ZwQueryValueKey = NtQueryValueKey

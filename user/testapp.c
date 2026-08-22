@@ -14,10 +14,13 @@ typedef unsigned long      DWORD;
 typedef unsigned long long ULONGLONG;
 typedef unsigned long long SIZE_T;
 typedef int                BOOL;
+typedef long               LONG;
+typedef unsigned short     WCHAR;
 typedef void             (*FARPROC)(void);
 
 #define STD_OUTPUT_HANDLE ((DWORD)-11)
 #define INFINITE          0xFFFFFFFF
+#define WAIT_OBJECT_0     0
 #define HEAP_ZERO_MEMORY  0x00000008
 
 __declspec(dllimport) HANDLE GetStdHandle(DWORD which);
@@ -25,9 +28,38 @@ __declspec(dllimport) BOOL   WriteFile(HANDLE, const void *, DWORD, DWORD *, LPV
 __declspec(dllimport) BOOL   ReadFile(HANDLE, void *, DWORD, DWORD *, LPVOID);
 __declspec(dllimport) HANDLE CreateFileA(const char *, DWORD, DWORD, LPVOID,
                                          DWORD, DWORD, HANDLE);
+__declspec(dllimport) HANDLE CreateFileW(const WCHAR *, DWORD, DWORD, LPVOID,
+                                         DWORD, DWORD, HANDLE);
+__declspec(dllimport) DWORD  GetFileSize(HANDLE, DWORD *);
+typedef struct _BY_HANDLE_FILE_INFORMATION {
+    DWORD dwFileAttributes;
+    struct { DWORD Low, High; } CreationTime, LastAccessTime, LastWriteTime;
+    DWORD dwVolumeSerialNumber;
+    DWORD nFileSizeHigh, nFileSizeLow, nNumberOfLinks;
+    DWORD nFileIndexHigh, nFileIndexLow;
+} BY_HANDLE_FILE_INFORMATION;
+typedef struct _SYSTEMTIME {
+    unsigned short Year, Month, DayOfWeek, Day;
+    unsigned short Hour, Minute, Second, Milliseconds;
+} SYSTEMTIME;
+__declspec(dllimport) BOOL GetFileInformationByHandle(
+    HANDLE, BY_HANDLE_FILE_INFORMATION *);
+__declspec(dllimport) BOOL FileTimeToSystemTime(const void *, SYSTEMTIME *);
+__declspec(dllimport) BOOL SetFilePointerEx(HANDLE, long long,
+                                            long long *, DWORD);
 __declspec(dllimport) HANDLE CreateThread(LPVOID, unsigned long long, LPVOID,
                                           LPVOID, DWORD, DWORD *);
 __declspec(dllimport) DWORD  WaitForSingleObject(HANDLE, DWORD);
+__declspec(dllimport) DWORD  WaitForMultipleObjects(DWORD, const HANDLE *,
+                                                    BOOL, DWORD);
+__declspec(dllimport) HANDLE CreateEventW(LPVOID, BOOL, BOOL, const WCHAR *);
+__declspec(dllimport) BOOL   SetEvent(HANDLE);
+__declspec(dllimport) BOOL   ResetEvent(HANDLE);
+__declspec(dllimport) HANDLE CreateSemaphoreW(LPVOID, LONG, LONG,
+                                               const WCHAR *);
+__declspec(dllimport) BOOL   ReleaseSemaphore(HANDLE, LONG, LONG *);
+__declspec(dllimport) void  *CreateThreadpoolWork(LPVOID, LPVOID, LPVOID);
+__declspec(dllimport) void   SubmitThreadpoolWork(LPVOID);
 __declspec(dllimport) BOOL   CloseHandle(HANDLE);
 __declspec(dllimport) void   ExitProcess(DWORD);
 
@@ -41,7 +73,6 @@ __declspec(dllimport) HANDLE  LoadLibraryA(const char *name);
 
 /* Registry (advapi32). */
 typedef void *HKEY;
-typedef long  LONG;
 #define HKEY_CURRENT_USER  ((HKEY)(ULONGLONG)0x80000001ULL)
 #define HKEY_LOCAL_MACHINE ((HKEY)(ULONGLONG)0x80000002ULL)
 #define REG_SZ     1
@@ -69,7 +100,6 @@ __declspec(dllimport) void *malloc(SIZE_T n);
 __declspec(dllimport) void  free(void *p);
 
 /* Wider Win32 surface (kernel32). */
-typedef long LONG;
 typedef struct { BYTE opaque[40]; } CRITICAL_SECTION;
 #define MEM_COMMIT     0x1000
 #define MEM_RESERVE    0x2000
@@ -90,12 +120,21 @@ __declspec(dllimport) void   InitializeCriticalSection(void *);
 __declspec(dllimport) void   EnterCriticalSection(void *);
 __declspec(dllimport) void   LeaveCriticalSection(void *);
 __declspec(dllimport) void   DeleteCriticalSection(void *);
+__declspec(dllimport) DWORD  TlsAlloc(void);
+__declspec(dllimport) BOOL   TlsFree(DWORD);
+__declspec(dllimport) LPVOID TlsGetValue(DWORD);
+__declspec(dllimport) BOOL   TlsSetValue(DWORD, LPVOID);
 
 /* Imported from kernel32 via a mismatched import lib -- the real kernel32.dll
  * doesn't export this, so the loader stubs it (proves load-past-missing-import). */
 __declspec(dllimport) int    NonexistentKernel32Function(void);
 
 static HANDLE g_out;
+static DWORD  g_tls_index = (DWORD)-1;
+static DWORD  g_worker_tid;
+static BOOL   g_worker_tls_ok;
+static HANDLE g_pool_done;
+static volatile LONG g_pool_calls;
 
 static DWORD str_len(const char *s)
 {
@@ -345,8 +384,20 @@ static void demo_syswin(void)
 static DWORD WorkerThread(LPVOID param)
 {
     (void)param;
+    g_worker_tid = GetCurrentThreadId();
+    g_worker_tls_ok = TlsGetValue(g_tls_index) == 0 &&
+                      GetLastError() == 0 &&
+                      TlsSetValue(g_tls_index, (LPVOID)(ULONGLONG)0x2222) &&
+                      TlsGetValue(g_tls_index) == (LPVOID)(ULONGLONG)0x2222;
     print("  [worker] hello from a Win32 thread (CreateThread)\n");
     return 0;
+}
+
+static void PoolCallback(void *instance, void *context, void *work)
+{
+    (void)instance; (void)context; (void)work;
+    InterlockedIncrement(&g_pool_calls);
+    SetEvent(g_pool_done);
 }
 
 int main(void)
@@ -363,11 +414,110 @@ int main(void)
     print(buffer);
     CloseHandle(file);
 
-    /* Spawn a worker thread and wait for it (CreateThread/WaitForSingleObject). */
+    /* Verify that an ordinary UTF-16 Win32 path reaches NtCreateFile too. */
+    static const WCHAR wide_name[] = {
+        'C',':','\\','M','E','S','S','A','G','E','.','T','X','T',0
+    };
+    file = CreateFileW(wide_name, 0, 0, 0, 3, 0, 0); /* OPEN_EXISTING */
+    read = 0;
+    DWORD size_high = 0;
+    DWORD size_low = file != (HANDLE)(ULONGLONG)-1
+                         ? GetFileSize(file, &size_high) : (DWORD)-1;
+    BY_HANDLE_FILE_INFORMATION file_info;
+    BOOL have_info = file != (HANDLE)(ULONGLONG)-1 &&
+                     GetFileInformationByHandle(file, &file_info);
+    SYSTEMTIME write_time;
+    BOOL have_time = have_info && FileTimeToSystemTime(
+        &file_info.LastWriteTime, &write_time);
+    long long new_position = -1;
+    BOOL seek_ok = file != (HANDLE)(ULONGLONG)-1 &&
+                   SetFilePointerEx(file, 5, &new_position, 0);
+    if (file != (HANDLE)(ULONGLONG)-1 && size_low == 213 && !size_high &&
+        have_info && file_info.nFileSizeLow == 213 &&
+        !file_info.nFileSizeHigh && file_info.dwFileAttributes == 0x20 &&
+        have_time && write_time.Year >= 2020 &&
+        write_time.Month >= 1 && write_time.Month <= 12 &&
+        write_time.Day >= 1 && write_time.Day <= 31 &&
+        seek_ok && new_position == 5 &&
+        ReadFile(file, buffer, 4, &read, 0) && read == 4 &&
+        buffer[0] == 'l' && buffer[1] == 'i' &&
+        buffer[2] == 'n' && buffer[3] == 'e') {
+        print("[ok] wide file + metadata + FAT time + seek\n");
+        CloseHandle(file);
+    } else {
+        print("[fail] CreateFileW\n");
+    }
+
+    /* Spawn a worker thread and verify both its TEB id and per-thread TLS. */
+    DWORD main_tid = GetCurrentThreadId();
+    g_tls_index = TlsAlloc();
+    BOOL main_tls_ok = g_tls_index != (DWORD)-1 &&
+                       TlsSetValue(g_tls_index, (LPVOID)(ULONGLONG)0x1111);
     HANDLE thread = CreateThread(0, 0, (LPVOID)WorkerThread, 0, 0, 0);
     WaitForSingleObject(thread, INFINITE);
     CloseHandle(thread);
     print("main: worker finished\n");
+    if (main_tls_ok && g_worker_tls_ok && g_worker_tid != 0 &&
+        g_worker_tid != main_tid &&
+        TlsGetValue(g_tls_index) == (LPVOID)(ULONGLONG)0x1111) {
+        print("[ok] distinct child TEB id + thread-local Tls* storage\n");
+    } else {
+        print("[fail] thread id / TLS isolation\n");
+    }
+    TlsFree(g_tls_index);
+
+    /* Dispatcher regression: wait-any index, signal consumption, wait-all,
+     * and a real timer-driven timeout over multiple kernel objects. */
+    HANDLE events[2];
+    events[0] = CreateEventW(0, 0, 0, 0); /* auto-reset, clear */
+    events[1] = CreateEventW(0, 0, 1, 0); /* auto-reset, signaled */
+    DWORD any = WaitForMultipleObjects(2, events, 0, 0);
+    DWORD consumed = WaitForMultipleObjects(2, events, 0, 0);
+    DWORD wait_start = GetTickCount();
+    DWORD timed = WaitForMultipleObjects(2, events, 0, 30);
+    DWORD wait_elapsed = GetTickCount() - wait_start;
+    CloseHandle(events[0]);
+    CloseHandle(events[1]);
+
+    events[0] = CreateEventW(0, 1, 1, 0); /* manual-reset, signaled */
+    events[1] = CreateEventW(0, 1, 1, 0);
+    DWORD all = WaitForMultipleObjects(2, events, 1, 0);
+    CloseHandle(events[0]);
+    CloseHandle(events[1]);
+    if (any == WAIT_OBJECT_0 + 1 && consumed == 0x102 &&
+        timed == 0x102 && wait_elapsed >= 30 && all == WAIT_OBJECT_0)
+        print("[ok] wait-any/all + poll + dispatcher timeout\n");
+    else
+        print("[fail] multiple-object wait / timeout\n");
+
+    HANDLE sync_event = CreateEventW(0, 1, 1, 0);
+    BOOL reset_ok = ResetEvent(sync_event) &&
+                    WaitForSingleObject(sync_event, 0) == 0x102;
+    BOOL set_ok = SetEvent(sync_event) &&
+                  WaitForSingleObject(sync_event, 0) == WAIT_OBJECT_0;
+    CloseHandle(sync_event);
+    HANDLE semaphore = CreateSemaphoreW(0, 0, 3, 0);
+    LONG previous = -1;
+    BOOL release_ok = ReleaseSemaphore(semaphore, 2, &previous);
+    DWORD sem1 = WaitForSingleObject(semaphore, 0);
+    DWORD sem2 = WaitForSingleObject(semaphore, 0);
+    DWORD sem3 = WaitForSingleObject(semaphore, 0);
+    CloseHandle(semaphore);
+    if (reset_ok && set_ok && release_ok && previous == 0 &&
+        sem1 == WAIT_OBJECT_0 && sem2 == WAIT_OBJECT_0 && sem3 == 0x102)
+        print("[ok] event set/reset + counting semaphore\n");
+    else
+        print("[fail] event / semaphore semantics\n");
+
+    g_pool_done = CreateEventW(0, 0, 0, 0);
+    void *pool_work = CreateThreadpoolWork((LPVOID)PoolCallback, 0, 0);
+    SubmitThreadpoolWork(pool_work);
+    DWORD pool_wait = WaitForSingleObject(g_pool_done, 1000);
+    if (pool_wait == WAIT_OBJECT_0 && g_pool_calls == 1)
+        print("[ok] persistent thread-pool worker + semaphore wake\n");
+    else
+        print("[fail] thread-pool work dispatch\n");
+    CloseHandle(g_pool_done);
 
     /* Exercise dynamic module/symbol resolution and the heap. */
     demo_dynamic_runtime();

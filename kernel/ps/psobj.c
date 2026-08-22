@@ -24,6 +24,7 @@ typedef struct _THREAD_OBJECT {
 
 static POBJECT_TYPE g_event_type;
 static POBJECT_TYPE g_thread_type;
+static POBJECT_TYPE g_semaphore_type;
 
 /* Bump allocator for per-thread user stacks and TEBs. */
 static UINT64 g_thread_va = 0x0000000030000000ULL;
@@ -33,6 +34,7 @@ void PsInitialize(void)
 {
     g_event_type = ObCreateObjectType("Event", NULL);
     g_thread_type = ObCreateObjectType("Thread", NULL);
+    g_semaphore_type = ObCreateObjectType("Semaphore", NULL);
 }
 
 /* ------------------------------------------------------------------ */
@@ -60,6 +62,8 @@ UINT64 NtCreateEvent(UINT64 *a)
     }
     ObDereferenceObject(obj); /* the handle keeps it alive */
     *out = h;
+    KeLog("[ps]   NtCreateEvent -> handle %p (thread %u)\n", (void *)h,
+          KeGetCurrentThread() ? KeGetCurrentThread()->ThreadId : 0);
     return (UINT64)STATUS_SUCCESS;
 }
 
@@ -74,6 +78,8 @@ UINT64 NtSetEvent(UINT64 *a)
                                               g_event_type, &obj)))
         return (UINT64)STATUS_INVALID_HANDLE;
 
+    KeLog("[ps]   NtSetEvent(handle %p, thread %u)\n", (void *)handle,
+          KeGetCurrentThread() ? KeGetCurrentThread()->ThreadId : 0);
     LONG previous = KeSetEvent((PKEVENT)obj);
     ObDereferenceObject(obj);
     if (prev_out && MmProbeForWrite((UINT64)prev_out, sizeof(LONG)))
@@ -81,32 +87,234 @@ UINT64 NtSetEvent(UINT64 *a)
     return (UINT64)STATUS_SUCCESS;
 }
 
+UINT64 NtResetEvent(UINT64 *a)
+{
+    POBJECT obj;
+    if (!NT_SUCCESS(ObReferenceObjectByHandle((HANDLE)(ULONG_PTR)a[0], 0,
+                                              g_event_type, &obj)))
+        return (UINT64)STATUS_INVALID_HANDLE;
+    PKEVENT event = (PKEVENT)obj;
+    LONG previous = event->Header.SignalState;
+    KeResetEvent(event);
+    LONG *previous_out = (LONG *)a[1];
+    if (previous_out && MmProbeForWrite((UINT64)previous_out, sizeof(LONG)))
+        *previous_out = previous;
+    ObDereferenceObject(obj);
+    return (UINT64)STATUS_SUCCESS;
+}
+
+/* ------------------------------------------------------------------ */
+/* Semaphores                                                         */
+/* ------------------------------------------------------------------ */
+
+UINT64 NtCreateSemaphore(UINT64 *a)
+{
+    PHANDLE out = (PHANDLE)a[0];
+    LONG initial = (LONG)a[3];
+    LONG limit = (LONG)a[4];
+    if (!MmProbeForWrite((UINT64)out, sizeof(HANDLE)))
+        return (UINT64)STATUS_ACCESS_VIOLATION;
+    if (limit <= 0 || initial < 0 || initial > limit)
+        return (UINT64)STATUS_INVALID_PARAMETER;
+
+    POBJECT obj;
+    if (!NT_SUCCESS(ObCreateObject(g_semaphore_type, sizeof(KSEMAPHORE), &obj)))
+        return (UINT64)STATUS_NO_MEMORY;
+    KeInitializeSemaphore((PKSEMAPHORE)obj, initial, limit);
+
+    HANDLE handle;
+    NTSTATUS status = ObCreateHandle(obj, GENERIC_ALL, &handle);
+    ObDereferenceObject(obj);
+    if (!NT_SUCCESS(status))
+        return (UINT64)status;
+    *out = handle;
+    return (UINT64)STATUS_SUCCESS;
+}
+
+UINT64 NtReleaseSemaphore(UINT64 *a)
+{
+    LONG release = (LONG)a[1];
+    if (release <= 0)
+        return (UINT64)STATUS_INVALID_PARAMETER;
+
+    POBJECT obj;
+    if (!NT_SUCCESS(ObReferenceObjectByHandle((HANDLE)(ULONG_PTR)a[0], 0,
+                                              g_semaphore_type, &obj)))
+        return (UINT64)STATUS_INVALID_HANDLE;
+    PKSEMAPHORE semaphore = (PKSEMAPHORE)obj;
+    if (semaphore->Header.SignalState > semaphore->Limit - release) {
+        ObDereferenceObject(obj);
+        return (UINT64)STATUS_INVALID_PARAMETER;
+    }
+    LONG previous = KeReleaseSemaphore(semaphore, release);
+    LONG *previous_out = (LONG *)a[2];
+    if (previous_out && MmProbeForWrite((UINT64)previous_out, sizeof(LONG)))
+        *previous_out = previous;
+    ObDereferenceObject(obj);
+    return (UINT64)STATUS_SUCCESS;
+}
+
 /* ------------------------------------------------------------------ */
 /* Waiting                                                            */
 /* ------------------------------------------------------------------ */
 
-/* NtWaitForSingleObject(HANDLE, BOOLEAN Alertable, PLARGE_INTEGER Timeout).
- * Alertable and Timeout are accepted but not yet honored (waits are infinite). */
-UINT64 NtWaitForSingleObject(UINT64 *a)
+static UINT64 timeout_to_ticks(const INT64 *timeout)
 {
-    UINT64 handle = a[0];
+    if (!timeout)
+        return ~(UINT64)0; /* infinite */
+    if (!MmProbeForRead((UINT64)timeout, sizeof(*timeout)))
+        return ~(UINT64)0;
 
-    POBJECT obj;
-    if (!NT_SUCCESS(ObReferenceObjectByHandle((HANDLE)(ULONG_PTR)handle, 0, NULL,
-                                              &obj)))
-        return (UINT64)STATUS_INVALID_HANDLE;
-
-    /* Only events and threads are waitable, and both bodies start with a
-     * DISPATCHER_HEADER. */
-    POBJECT_TYPE type = ObHeaderFromObject(obj)->Type;
-    if (type != g_event_type && type != g_thread_type) {
-        ObDereferenceObject(obj);
-        return (UINT64)STATUS_OBJECT_TYPE_MISMATCH;
+    INT64 value = *timeout;
+    if (value == 0)
+        return 0;
+    if (value < 0) {
+        UINT64 units = (UINT64)(-(value + 1)) + 1; /* handles INT64_MIN */
+        return (units + 99999ULL) / 100000ULL;     /* 100 ns -> 10 ms */
     }
 
-    NTSTATUS st = KeWaitForSingleObject((PDISPATCHER_HEADER)obj);
+    /* Absolute deadlines use the same since-boot 100 ns clock currently
+     * exposed through KUSER_SHARED_DATA. */
+    UINT64 now = KeGetTickCount() * 100000ULL;
+    if ((UINT64)value <= now)
+        return 0;
+    return ((UINT64)value - now + 99999ULL) / 100000ULL;
+}
+
+static NTSTATUS reference_waitable(HANDLE handle, POBJECT *object,
+                                   PDISPATCHER_HEADER *header)
+{
+    POBJECT obj;
+    NTSTATUS status = ObReferenceObjectByHandle(handle, 0, NULL, &obj);
+    if (!NT_SUCCESS(status))
+        return STATUS_INVALID_HANDLE;
+
+    POBJECT_TYPE type = ObHeaderFromObject(obj)->Type;
+    if (type != g_event_type && type != g_thread_type &&
+        type != g_semaphore_type) {
+        ObDereferenceObject(obj);
+        return STATUS_OBJECT_TYPE_MISMATCH;
+    }
+    *object = obj;
+    *header = (PDISPATCHER_HEADER)obj;
+    return STATUS_SUCCESS;
+}
+
+/* NtWaitForSingleObject(HANDLE, BOOLEAN Alertable, PLARGE_INTEGER Timeout). */
+UINT64 NtWaitForSingleObject(UINT64 *a)
+{
+    (void)a[1]; /* alertable APC delivery is not implemented yet */
+    POBJECT obj;
+    PDISPATCHER_HEADER header;
+    NTSTATUS st = reference_waitable((HANDLE)(ULONG_PTR)a[0], &obj, &header);
+    if (!NT_SUCCESS(st))
+        return (UINT64)st;
+
+    /* Diagnostics: an indefinite wait is the signature of a stuck user
+     * thread; report each begin/end pair. */
+    BOOLEAN indefinite = !a[2];
+    UINT64 tid = 0;
+    PKTHREAD thread = KeGetCurrentThread();
+    if (thread)
+        tid = thread->ThreadId;
+    if (indefinite) {
+        static UINT64 logged[64];
+        static ULONG logged_count;
+        BOOLEAN seen = FALSE;
+        for (ULONG i = 0; i < logged_count; i++)
+            if (logged[i] == (tid << 32 | (UINT32)(ULONG_PTR)a[0]))
+                seen = TRUE;
+        if (!seen && logged_count < 64) {
+            logged[logged_count++] = tid << 32 | (UINT32)(ULONG_PTR)a[0];
+            KeLog("[ps]   thread %llu begins indefinite wait on handle %p\n",
+                  (unsigned long long)tid, (void *)(ULONG_PTR)a[0]);
+        }
+    }
+
+    st = KeWaitForSingleObjectTimeout(header,
+                                      timeout_to_ticks((const INT64 *)a[2]));
+    if (indefinite)
+        KeLog("[ps]   thread %llu resumed from indefinite wait on %p "
+              "(status 0x%08lx)\n", (unsigned long long)tid,
+              (void *)(ULONG_PTR)a[0], (unsigned long)st);
     ObDereferenceObject(obj);
     return (UINT64)st;
+}
+
+/* NTOS-private service used by kernel32 until the native system-service table
+ * is switched to a specific Windows build's NtWaitForMultipleObjects number.
+ * Arguments mirror the native routine closely: count, handle array, WaitType
+ * (0=all, 1=any), alertable, timeout. */
+UINT64 NtWaitForMultipleObjects(UINT64 *a)
+{
+    ULONG count = (ULONG)a[0];
+    HANDLE *handles = (HANDLE *)a[1];
+    ULONG wait_type = (ULONG)a[2];
+    (void)a[3]; /* alertable */
+    const INT64 *timeout = (const INT64 *)a[4];
+
+    if (!count || count > KE_MAXIMUM_WAIT_OBJECTS || wait_type > 1)
+        return (UINT64)STATUS_INVALID_PARAMETER;
+    if (!MmProbeForRead((UINT64)handles, count * sizeof(HANDLE)))
+        return (UINT64)STATUS_ACCESS_VIOLATION;
+
+    POBJECT objects[KE_MAXIMUM_WAIT_OBJECTS];
+    PDISPATCHER_HEADER headers[KE_MAXIMUM_WAIT_OBJECTS];
+    ULONG referenced = 0;
+    NTSTATUS status = STATUS_SUCCESS;
+    for (; referenced < count; referenced++) {
+        status = reference_waitable(handles[referenced], &objects[referenced],
+                                    &headers[referenced]);
+        if (!NT_SUCCESS(status))
+            break;
+    }
+
+    if (NT_SUCCESS(status))
+        status = KeWaitForMultipleObjects(count, headers,
+                                          (BOOLEAN)(wait_type == 0),
+                                          timeout_to_ticks(timeout));
+    while (referenced)
+        ObDereferenceObject(objects[--referenced]);
+    return (UINT64)status;
+}
+
+/* NtQueryInformationProcess: the first class required by real SHCORE during
+ * DLL initialization is ProcessBasicInformation (0). */
+UINT64 NtQueryInformationProcess(UINT64 *a)
+{
+    typedef struct _PROCESS_BASIC_INFORMATION_LOCAL {
+        NTSTATUS ExitStatus;
+        UINT32 Padding;
+        PVOID PebBaseAddress;
+        UINT64 AffinityMask;
+        LONG BasePriority;
+        UINT32 Padding2;
+        UINT64 UniqueProcessId;
+        UINT64 InheritedFromUniqueProcessId;
+    } PROCESS_BASIC_INFORMATION_LOCAL;
+
+    ULONG info_class = (ULONG)a[1];
+    void *buffer = (void *)a[2];
+    ULONG length = (ULONG)a[3];
+    ULONG *return_length = (ULONG *)a[4];
+    if (info_class != 0)
+        return (UINT64)STATUS_INVALID_INFO_CLASS;
+    if (return_length && MmProbeForWrite((UINT64)return_length, sizeof(ULONG)))
+        *return_length = sizeof(PROCESS_BASIC_INFORMATION_LOCAL);
+    if (length < sizeof(PROCESS_BASIC_INFORMATION_LOCAL))
+        return (UINT64)STATUS_INFO_LENGTH_MISMATCH;
+    if (!MmProbeForWrite((UINT64)buffer,
+                         sizeof(PROCESS_BASIC_INFORMATION_LOCAL)))
+        return (UINT64)STATUS_ACCESS_VIOLATION;
+
+    PROCESS_BASIC_INFORMATION_LOCAL *info = buffer;
+    memset(info, 0, sizeof(*info));
+    info->ExitStatus = STATUS_PENDING;
+    info->PebBaseAddress = (PVOID)PROCESS_PEB_VA;
+    info->AffinityMask = 1;
+    info->BasePriority = 8;
+    info->UniqueProcessId = 1;
+    return (UINT64)STATUS_SUCCESS;
 }
 
 /* ------------------------------------------------------------------ */
@@ -141,13 +349,20 @@ UINT64 NtCreateThreadEx(UINT64 *a)
 
     /* Stack + TEB for the new thread. */
     UINT64 stack_base = map_user_pages(THREAD_STACK_PAGES);
-    UINT64 teb_va = map_user_pages(1);
+    UINT64 teb_va = map_user_pages(PROCESS_TEB_SIZE / PAGE_SIZE);
     if (!stack_base || !teb_va)
         return (UINT64)STATUS_NO_MEMORY;
     UINT64 stack_top = stack_base + THREAD_STACK_PAGES * PAGE_SIZE;
 
     PTEB teb = (PTEB)teb_va;
-    memset(teb, 0, sizeof(*teb));
+    memset(teb, 0, PROCESS_TEB_SIZE);
+    /* USER32 keeps its per-thread client callback/cache block in the extended
+     * TEB starting at 0x800. The kernel normally initializes this as a thread
+     * joins win32k. Until that path is split out, inherit the process template
+     * established in the main TEB during USER32 process attach. */
+    memcpy((UINT8 *)teb + 0x800,
+           (const UINT8 *)PROCESS_MAIN_TEB_VA + 0x800,
+           PROCESS_TEB_SIZE - 0x800);
     teb->NtTib.Self = (struct _NT_TIB *)teb_va;
     teb->NtTib.StackBase = (PVOID)stack_top;
     teb->NtTib.StackLimit = (PVOID)stack_base;
@@ -182,6 +397,17 @@ UINT64 NtCreateThreadEx(UINT64 *a)
     ObDereferenceObject(obj); /* the handle keeps it alive */
 
     *out = h;
-    KeLog("[ps]   NtCreateThreadEx(entry=%p) -> handle %p\n", (void *)entry, h);
+    UINT64 user_start = 0;
+    if (arg && MmProbeForRead(arg, sizeof(UINT64)))
+        user_start = *(const UINT64 *)arg; /* kernel32 THREAD_INFO.Start */
+    KeLog("[ps]   NtCreateThreadEx(entry=%p, start=%p) -> handle %p\n",
+          (void *)entry, (void *)user_start, h);
+
+    /* A newly-created Windows thread is eligible to run before
+     * NtCreateThreadEx returns. SHCore relies on that scheduling point when it
+     * hands a worker a short-lived stack context and waits for the worker to
+     * copy it. Let the child execute now instead of allowing the creator to
+     * reuse that stack storage first. */
+    KeYield();
     return (UINT64)STATUS_SUCCESS;
 }

@@ -14,27 +14,57 @@
 #include <nt/ntstatus.h>
 
 /* Try to satisfy a wait without blocking, consuming the signal as appropriate. */
-static BOOLEAN KiTryAcquire(PDISPATCHER_HEADER h)
+static BOOLEAN KiCanAcquire(PDISPATCHER_HEADER h)
 {
     switch (h->Type) {
     case EventNotificationObject:
     case ThreadObject:
-        return (BOOLEAN)(h->SignalState != 0); /* level-triggered, no consume */
     case EventSynchronizationObject:
-        if (h->SignalState) {
-            h->SignalState = 0;
-            return TRUE;
-        }
-        return FALSE;
     case SemaphoreObject:
     case MutantObject:
-        if (h->SignalState > 0) {
-            h->SignalState--;
-            return TRUE;
-        }
-        return FALSE;
+        return (BOOLEAN)(h->SignalState > 0);
     }
     return FALSE;
+}
+
+static void KiConsumeSignal(PDISPATCHER_HEADER h)
+{
+    switch (h->Type) {
+    case EventNotificationObject:
+    case ThreadObject:
+        break; /* level-triggered, never consumed */
+    case EventSynchronizationObject:
+        h->SignalState = 0;
+        break;
+    case SemaphoreObject:
+    case MutantObject:
+        h->SignalState--;
+        break;
+    }
+}
+
+/* Remove every outstanding wait block owned by a thread. Each entry is made a
+ * self-list when detached so cancellation and signaling can safely race on the
+ * single CPU without removing the same entry twice. */
+static void KiUnlinkThreadWait(PKTHREAD thread)
+{
+    for (ULONG i = 0; i < thread->WaitBlockCount; i++) {
+        PLIST_ENTRY entry = &thread->WaitBlocks[i].WaitListEntry;
+        if (entry->Flink != entry) {
+            RemoveEntryList(entry);
+            InitializeListHead(entry);
+        }
+    }
+}
+
+static void KiWakeWaitingThread(PKTHREAD thread, NTSTATUS status)
+{
+    if (thread->State != ThreadStateWaiting)
+        return;
+    KiUnlinkThreadWait(thread);
+    thread->WaitStatus = status;
+    thread->WaitDeadline = 0;
+    KiReadyThread(thread);
 }
 
 /* Wake every thread waiting on this header so it can re-test the object. */
@@ -42,26 +72,92 @@ void KiSignalObject(PDISPATCHER_HEADER h)
 {
     while (!IsListEmpty(&h->WaitListHead)) {
         PLIST_ENTRY e = RemoveHeadList(&h->WaitListHead);
+        InitializeListHead(e);
         PKWAIT_BLOCK wb = CONTAINING_RECORD(e, KWAIT_BLOCK, WaitListEntry);
-        KiReadyThread(wb->Thread);
+        KiWakeWaitingThread(wb->Thread, STATUS_SUCCESS);
     }
+}
+
+void KiTimeoutThreadWait(PKTHREAD thread)
+{
+    KiWakeWaitingThread(thread, STATUS_TIMEOUT);
+}
+
+NTSTATUS KeWaitForMultipleObjects(ULONG count, PDISPATCHER_HEADER *objects,
+                                  BOOLEAN wait_all, UINT64 timeout_ticks)
+{
+    if (!count || count > KE_MAXIMUM_WAIT_OBJECTS || !objects)
+        return STATUS_INVALID_PARAMETER;
+
+    UINT64 flags = KiIrqSave();
+    PKTHREAD thread = KeGetCurrentThread();
+    UINT64 deadline = timeout_ticks == ~(UINT64)0
+                          ? 0 : KeGetTickCount() + timeout_ticks;
+
+    for (;;) {
+        if (wait_all) {
+            BOOLEAN ready = TRUE;
+            for (ULONG i = 0; i < count; i++)
+                if (!KiCanAcquire(objects[i])) {
+                    ready = FALSE;
+                    break;
+                }
+            if (ready) {
+                for (ULONG i = 0; i < count; i++)
+                    KiConsumeSignal(objects[i]);
+                KiIrqRestore(flags);
+                return STATUS_WAIT_0;
+            }
+        } else {
+            for (ULONG i = 0; i < count; i++) {
+                if (KiCanAcquire(objects[i])) {
+                    KiConsumeSignal(objects[i]);
+                    KiIrqRestore(flags);
+                    return (NTSTATUS)(STATUS_WAIT_0 + i);
+                }
+            }
+        }
+
+        if (timeout_ticks == 0 || (deadline && KeGetTickCount() >= deadline)) {
+            KiIrqRestore(flags);
+            return STATUS_TIMEOUT;
+        }
+
+        thread->WaitBlockCount = count;
+        thread->WaitStatus = STATUS_PENDING;
+        thread->WaitDeadline = deadline;
+        for (ULONG i = 0; i < count; i++) {
+            PKWAIT_BLOCK block = &thread->WaitBlocks[i];
+            InitializeListHead(&block->WaitListEntry);
+            block->Thread = thread;
+            block->Object = objects[i];
+            InsertTailList(&objects[i]->WaitListHead, &block->WaitListEntry);
+        }
+        thread->State = ThreadStateWaiting;
+        KiBlockCurrentThread(); /* reschedule; returns once signalled */
+
+        /* Signaling and timeout paths normally unlink all blocks before making
+         * us ready. This is also safe as defensive cleanup. */
+        KiUnlinkThreadWait(thread);
+        if (thread->WaitStatus == STATUS_TIMEOUT) {
+            thread->WaitBlockCount = 0;
+            KiIrqRestore(flags);
+            return STATUS_TIMEOUT;
+        }
+        thread->WaitBlockCount = 0;
+    }
+}
+
+NTSTATUS KeWaitForSingleObjectTimeout(PDISPATCHER_HEADER h,
+                                      UINT64 timeout_ticks)
+{
+    PDISPATCHER_HEADER objects[1] = { h };
+    return KeWaitForMultipleObjects(1, objects, FALSE, timeout_ticks);
 }
 
 NTSTATUS KeWaitForSingleObject(PDISPATCHER_HEADER h)
 {
-    UINT64 flags = KiIrqSave();
-
-    while (!KiTryAcquire(h)) {
-        PKTHREAD t = KeGetCurrentThread();
-        t->WaitBlock.Thread = t;
-        t->WaitBlock.Object = h;
-        InsertTailList(&h->WaitListHead, &t->WaitBlock.WaitListEntry);
-        t->State = ThreadStateWaiting;
-        KiBlockCurrentThread(); /* reschedule; returns once signalled */
-    }
-
-    KiIrqRestore(flags);
-    return STATUS_SUCCESS;
+    return KeWaitForSingleObjectTimeout(h, ~(UINT64)0);
 }
 
 /* ------------------------------------------------------------------ */

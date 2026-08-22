@@ -22,36 +22,14 @@
 
 #define NTOS_VERSION "0.6.0"
 
-/* Compose a simple desktop on the framebuffer: a background, a top bar with the
- * OS name, a taskbar, and a text area the kernel log renders into. */
-static void DrawDesktop(void)
-{
-    if (!GfxAvailable())
-        return;
-
-    UINT32 W = GfxFramebuffer.Width, H = GfxFramebuffer.Height;
-    UINT32 desktop = GfxColor(0x1e, 0x3a, 0x5f);
-    UINT32 bar     = GfxColor(0x0a, 0x14, 0x28);
-    UINT32 accent  = GfxColor(0x3a, 0x86, 0xff);
-    UINT32 white   = GfxColor(0xff, 0xff, 0xff);
-    UINT32 dim     = GfxColor(0x8a, 0xa0, 0xc0);
-
-    GfxClear(desktop);
-
-    /* Top bar. */
-    GfxFillRect(0, 0, W, 36, bar);
-    GfxFillRect(0, 36, W, 2, accent);
-    GfxDrawString(12, 10, "NTOS  -  NT-compatible OS for x86-64   (v" NTOS_VERSION ")",
-                  white, bar);
-
-    /* Taskbar. */
-    GfxFillRect(0, H - 32, W, 32, bar);
-    GfxFillRect(0, H - 32, W, 2, accent);
-    GfxDrawString(12, H - 22, "[ Start ]   kernel console", dim, bar);
-
-    GfxConsoleInit();
-    HalConsoleUseFramebuffer();
-}
+/* Set by the top-level Makefile (PROGRAM=...).  This keeps the boot path the
+ * same for built-in test PEs and a real PE supplied in the repository root. */
+#ifndef NTOS_BOOT_PROGRAM
+#define NTOS_BOOT_PROGRAM "testapp.exe"
+#endif
+#ifndef NTOS_BOOT_COMMAND_LINE
+#define NTOS_BOOT_COMMAND_LINE NTOS_BOOT_PROGRAM
+#endif
 
 /* User stack for the loaded program (grows down from the top). */
 #define USER_STACK_TOP   0x0000000010010000ULL
@@ -71,8 +49,9 @@ static void DemoWorker(PVOID context)
     KeLog("   [kthread %s] finished\n", name);
 }
 
-/* The input thread: draw and drive the mouse cursor from PS/2 motion, and echo
- * typed characters into the console. This is the desktop's live input loop. */
+/* The input thread keeps the hardware queues alive for the future USER32 input
+ * path. The framebuffer cursor remains a low-level pointer primitive, not a
+ * kernel-drawn shell or desktop. */
 static void InputWorker(PVOID context)
 {
     (void)context;
@@ -85,8 +64,10 @@ static void InputWorker(PVOID context)
         /* Echo any typed characters. */
         while (KbdDataAvailable()) {
             char c = KbdReadChar();
-            if (c)
+            if (c) {
                 KeLog("%c", c);
+                KiUserQueueCharacter((UINT8)c);
+            }
         }
 
         /* Redraw the cursor when the mouse has moved. Mask interrupts for the
@@ -95,6 +76,7 @@ static void InputWorker(PVOID context)
         UINT32 seq = MouseState.Seq;
         if (seq != last_seq) {
             last_seq = seq;
+            KiUserQueueMouse(MouseState.X, MouseState.Y, MouseState.Buttons);
             UINT64 flags = KiIrqSave();
             GfxMoveCursor(MouseState.X, MouseState.Y);
             KiIrqRestore(flags);
@@ -222,11 +204,14 @@ void KiSystemStartup(UINT32 magic, UINT32 mbi_phys)
     /* Map the shared user-data page (tick count / system time for ring 3). */
     KeInitializeSharedData();
 
-    /* Bring up the framebuffer and draw the desktop; from here the kernel log
-     * also renders on the graphical screen. */
+    /* Bring up the raw framebuffer, but deliberately do not draw a kernel
+     * desktop, taskbar, window or graphical log console. The visible shell is
+     * now exclusively the responsibility of the Windows-compatible user-mode
+     * stack we are building for explorer.exe. */
     GfxInitialize();
-    DrawDesktop();
-    KeLog("NTOS graphical console online.\n");
+    if (GfxAvailable())
+        GfxClear(GfxColor(0, 0, 0));
+    KeLog("[gfx]  raw framebuffer ready; no built-in desktop\n");
 
     /* Sanity-check the new address space: translate a kernel address and a
      * direct-map address back to physical. */
@@ -272,18 +257,20 @@ void KiSystemStartup(UINT32 magic, UINT32 mbi_phys)
     if (!NT_SUCCESS(io))
         KeLog("[io]   WARNING: no filesystem (status 0x%08x)\n", (unsigned)io);
 
-    KeLog("[test] --- loading testapp.exe from disk ---\n");
+    KeLog("[test] --- loading %s from disk ---\n", NTOS_BOOT_PROGRAM);
     KeInitializeScheduler();
 
-    UINT64 pe_entry, pe_base;
-    NTSTATUS st = LdrLoadExecutable("testapp.exe", &pe_entry, &pe_base);
+    UINT64 pe_entry, pe_base, pe_arg;
+    NTSTATUS st = LdrLoadExecutable(NTOS_BOOT_PROGRAM, &pe_entry, &pe_base,
+                                    &pe_arg);
     if (NT_SUCCESS(st)) {
         UINT64 stack_top = SetupUserStack();
         UINT64 stack_base = USER_STACK_TOP - USER_STACK_PAGES * PAGE_SIZE;
-        PsCreateUserProcess("testapp.exe", pe_entry, pe_base, stack_base,
-                            stack_top);
+        PsCreateUserProcess(NTOS_BOOT_PROGRAM, NTOS_BOOT_COMMAND_LINE,
+                            pe_entry, pe_base, stack_base, stack_top, pe_arg);
     } else {
-        KeLog("[test] failed to load testapp.exe: status 0x%08x\n", (unsigned)st);
+        KeLog("[test] failed to load %s: status 0x%08x\n",
+              NTOS_BOOT_PROGRAM, (unsigned)st);
     }
 
     KeCreateThread("KWorker", DemoWorker, (PVOID)"KWorker", 8);

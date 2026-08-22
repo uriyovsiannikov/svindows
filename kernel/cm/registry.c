@@ -231,8 +231,11 @@ static NTSTATUS cm_resolve_oa(POBJECT_ATTRIBUTES oa, BOOLEAN create,
         return STATUS_ACCESS_VIOLATION;
 
     CM_KEY *k = cm_walk(parent, name, create);
-    if (!k)
+    if (!k) {
+        KeLog("[cm]   key %s%s not found\n",
+              create ? "" : "(open) ", name);
         return create ? STATUS_NO_MEMORY : STATUS_OBJECT_NAME_NOT_FOUND;
+    }
     *out = k;
     return STATUS_SUCCESS;
 }
@@ -363,6 +366,128 @@ void CmInitialize(void)
     }
     /* An empty \Registry\User for HKEY_CURRENT_USER to hang off of. */
     cm_walk(g_cm_root, "\\Registry\\User", TRUE);
+
+    /* Winlogon's list of registered shell images.  Explorer refuses to run as
+     * the shell unless its own image name appears under this key, so seed it
+     * with the inbox shell.  The value data is UTF-16 (REG_SZ). */
+    CM_KEY *shells = cm_walk(g_cm_root,
+        "\\Registry\\Machine\\Software\\Microsoft\\Windows NT\\CurrentVersion"
+        "\\Winlogon\\AlternateShells\\AvailableShells", TRUE);
+    if (shells) {
+        static const UINT16 shell_image[] = {
+            'e', 0, 'x', 0, 'p', 0, 'l', 0, 'o', 0, 'r', 0, 'e', 0,
+            'r', 0, '.', 0, 'e', 0, 'x', 0, 'e', 0, 0, 0
+        };
+        cm_set_value(shells, "Shell", REG_SZ, shell_image,
+                     sizeof(shell_image));
+    }
+
+    /* Explorer's shell startup reads the accent color chosen during OOBE and
+     * treats a failed read as a fatal initialization error. */
+    CM_KEY *accent = cm_walk(g_cm_root,
+        "\\Registry\\Machine\\Software\\Microsoft\\Windows\\CurrentVersion"
+        "\\Explorer\\Accent", TRUE);
+    if (accent) {
+        UINT32 oobe_color_set = 4;
+        cm_set_value(accent, "OOBEColorSet", REG_DWORD, &oobe_color_set,
+                     sizeof(oobe_color_set));
+    }
+
+    /* Keys the shell and its supporting DLLs probe during startup.  Missing
+     * keys are legal on Windows, but seeding the ones with fixed semantics
+     * keeps the boot path deterministic. */
+    cm_walk(g_cm_root,
+        "\\Registry\\Machine\\Software\\Microsoft\\Windows NT\\CurrentVersion"
+        "\\Winlogon", TRUE);
+    cm_walk(g_cm_root,
+        "\\Registry\\Machine\\Software\\Microsoft\\Windows\\Dwm", TRUE);
+    cm_walk(g_cm_root,
+        "\\Registry\\Machine\\Software\\Microsoft\\Direct2D", TRUE);
+    cm_walk(g_cm_root,
+        "\\Registry\\Machine\\Software\\Microsoft\\OLE", TRUE);
+    cm_walk(g_cm_root,
+        "\\Registry\\Machine\\Software\\Policies\\Microsoft\\Windows"
+        "\\Personalization", TRUE);
+    cm_walk(g_cm_root,
+        "\\Registry\\Machine\\Software\\Microsoft\\Windows\\CurrentVersion"
+        "\\Policies\\Explorer", TRUE);
+    cm_walk(g_cm_root,
+        "\\Registry\\Machine\\Software\\Microsoft\\Windows\\CurrentVersion"
+        "\\Explorer\\FolderDescriptions", TRUE);
+    cm_walk(g_cm_root,
+        "\\Registry\\Machine\\Software\\Microsoft\\Windows\\CurrentVersion"
+        "\\Explorer\\Shell Folders", TRUE);
+    cm_walk(g_cm_root,
+        "\\Registry\\Machine\\System\\Setup", TRUE);
+    cm_walk(g_cm_root,
+        "\\Registry\\Machine\\Software\\Microsoft\\Windows\\CurrentVersion"
+        "\\Explorer\\WCDEn", TRUE);
+
+    CM_KEY *user_software = cm_walk(g_cm_root,
+        "\\Registry\\User\\Software\\Microsoft\\Windows\\CurrentVersion",
+        TRUE);
+    if (user_software) {
+        cm_walk(user_software, "Explorer", TRUE);
+        cm_walk(user_software, "Search", TRUE);
+        cm_walk(user_software, "Policies", TRUE);
+        cm_walk(user_software, "Explorer\\User Shell Folders", TRUE);
+        cm_walk(user_software, "Explorer\\Shell Folders", TRUE);
+        cm_walk(user_software,
+                "Explorer\\Desktop\\NameSpace", TRUE);
+
+        /* Standard per-user shell folder redirections (REG_EXPAND_SZ). The
+         * shell resolves known folders through these before falling back to
+         * its internal defaults. */
+        CM_KEY *usf = cm_walk(user_software,
+                              "Explorer\\User Shell Folders", TRUE);
+        if (usf) {
+            static const UINT16 desktop[] = {
+                '%',0,'U',0,'S',0,'E',0,'R',0,'P',0,'R',0,'O',0,'F',0,'I',0,
+                'L',0,'E',0,'%',0,'\\',0,'D',0,'e',0,'s',0,'k',0,'t',0,'o',
+                0,'p',0,0,0
+            };
+            static const UINT16 personal[] = {
+                '%',0,'U',0,'S',0,'E',0,'R',0,'P',0,'R',0,'O',0,'F',0,'I',0,
+                'L',0,'E',0,'%',0,'\\',0,'D',0,'o',0,'c',0,'u',0,'m',0,'e',
+                0,'n',0,'t',0,'s',0,0,0
+            };
+            static const UINT16 appdata[] = {
+                '%',0,'U',0,'S',0,'E',0,'R',0,'P',0,'R',0,'O',0,'F',0,'I',0,
+                'L',0,'E',0,'%',0,'\\',0,'A',0,'p',0,'p',0,'D',0,'a',0,'t',
+                0,'a',0,'\\',0,'R',0,'o',0,'a',0,'m',0,'i',0,'n',0,'g',0,0,0
+            };
+            static const UINT16 start_menu[] = {
+                '%',0,'U',0,'S',0,'E',0,'R',0,'P',0,'R',0,'O',0,'F',0,'I',0,
+                'L',0,'E',0,'%',0,'\\',0,'A',0,'p',0,'p',0,'D',0,'a',0,'t',
+                0,'a',0,'\\',0,'R',0,'o',0,'a',0,'m',0,'i',0,'n',0,'g',0,
+                '\\',0,'M',0,'i',0,'c',0,'r',0,'o',0,'s',0,'o',0,'f',0,'t',
+                0,'\\',0,'W',0,'i',0,'n',0,'d',0,'o',0,'w',0,'s',0,'\\',0,
+                'S',0,'t',0,'a',0,'r',0,'t',0,' ',0,'M',0,'e',0,'n',0,'u',0,0,0
+            };
+            cm_set_value(usf, "Desktop", REG_EXPAND_SZ, desktop,
+                         sizeof(desktop));
+            cm_set_value(usf, "Personal", REG_EXPAND_SZ, personal,
+                         sizeof(personal));
+            cm_set_value(usf, "AppData", REG_EXPAND_SZ, appdata,
+                         sizeof(appdata));
+            cm_set_value(usf, "Start Menu", REG_EXPAND_SZ, start_menu,
+                         sizeof(start_menu));
+        }
+    }
+
+    /* The profile list backs %USERPROFILE%-style expansion during known
+     * folder resolution. */
+    CM_KEY *profile_list = cm_walk(g_cm_root,
+        "\\Registry\\Machine\\Software\\Microsoft\\Windows NT\\CurrentVersion"
+        "\\ProfileList", TRUE);
+    if (profile_list) {
+        static const UINT16 profiles_dir[] = {
+            '%',0,'S',0,'y',0,'s',0,'t',0,'e',0,'m',0,'D',0,'r',0,'i',0,
+            'v',0,'e',0,'%',0,'\\',0,'U',0,'s',0,'e',0,'r',0,'s',0,0,0
+        };
+        cm_set_value(profile_list, "ProfilesDirectory", REG_EXPAND_SZ,
+                     profiles_dir, sizeof(profiles_dir));
+    }
 
     KeLog("[cm]   registry ready: Key type + \\Registry hive\n");
 }

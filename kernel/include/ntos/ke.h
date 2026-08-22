@@ -169,6 +169,8 @@ typedef struct _KWAIT_BLOCK {
     PDISPATCHER_HEADER Object;
 } KWAIT_BLOCK, *PKWAIT_BLOCK;
 
+#define KE_MAXIMUM_WAIT_OBJECTS 64
+
 typedef struct _KEVENT {
     DISPATCHER_HEADER Header;
 } KEVENT, *PKEVENT;
@@ -213,7 +215,10 @@ typedef struct _KTHREAD {
 
     /* Synchronization: the block used while this thread waits, and the
      * dispatcher header (if any) that is signaled when it terminates. */
-    KWAIT_BLOCK        WaitBlock;
+    KWAIT_BLOCK        WaitBlocks[KE_MAXIMUM_WAIT_OBJECTS];
+    ULONG              WaitBlockCount;
+    UINT64             WaitDeadline; /* tick deadline; 0 means infinite */
+    NTSTATUS           WaitStatus;
     PDISPATCHER_HEADER TerminationObject;
 
     /* x87+SSE state saved across context switches (FXSAVE image; 16-aligned). */
@@ -245,6 +250,10 @@ NORETURN void KeTerminateThread(void);
 void      KeClockTick(void);
 UINT64    KeGetTickCount(void);
 
+/* Feed hardware input into the minimal process-wide USER message queue. */
+void      KiUserQueueCharacter(UINT16 character);
+void      KiUserQueueMouse(INT32 x, INT32 y, UINT8 buttons);
+
 /* KUSER_SHARED_DATA: the read-only page (user VA 0x7FFE0000) the kernel keeps
  * current so ring 3 can read the tick count / system time without a syscall. */
 void      KeInitializeSharedData(void);
@@ -268,8 +277,18 @@ LONG KeReleaseSemaphore(PKSEMAPHORE sem, LONG count);
 void KeInitializeMutant(PKMUTANT mutant, BOOLEAN initially_owned);
 LONG KeReleaseMutant(PKMUTANT mutant);
 
-/* Block until `object` (a DISPATCHER_HEADER) is signaled and acquired. */
+/* Block until `object` is signaled/acquired. timeout_ticks is zero for a poll,
+ * UINT64_MAX for an infinite wait, or a relative number of clock ticks. */
 NTSTATUS KeWaitForSingleObject(PDISPATCHER_HEADER object);
+NTSTATUS KeWaitForSingleObjectTimeout(PDISPATCHER_HEADER object,
+                                      UINT64 timeout_ticks);
+NTSTATUS KeWaitForMultipleObjects(ULONG count,
+                                  PDISPATCHER_HEADER *objects,
+                                  BOOLEAN wait_all, UINT64 timeout_ticks);
+
+/* Cancel a pending dispatcher wait and make the thread runnable. Called by the
+ * clock when a wait deadline expires (interrupts already disabled). */
+void KiTimeoutThreadWait(PKTHREAD thread);
 
 /* Signal a header and wake its waiters (interrupts must be disabled). */
 void KiSignalObject(PDISPATCHER_HEADER header);

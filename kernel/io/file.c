@@ -30,6 +30,8 @@ typedef struct _FILE_OBJECT {
     UINT8    *Data;     /* cached contents for disk files (NULL for console) */
     SIZE_T    Size;
     SIZE_T    Position;
+    UINT16    FatWriteDate;
+    UINT16    FatWriteTime;
 } FILE_OBJECT;
 
 static POBJECT_TYPE g_file_type;
@@ -60,6 +62,8 @@ void IoInitializeObjects(void)
     cf->Data = NULL;
     cf->Size = 0;
     cf->Position = 0;
+    cf->FatWriteDate = 0;
+    cf->FatWriteTime = 0;
 
     ObInsertObjectByName(devdir, "Console", g_console_file);
     ObDereferenceObject(g_console_file); /* the namespace owns it now */
@@ -110,7 +114,8 @@ UINT64 NtCreateFile(UINT64 *a)
 
         void *data;
         SIZE_T size;
-        if (!NT_SUCCESS(FatLoadFile(fname, &data, &size))) {
+        FAT_FIND_DATA fat_info;
+        if (!NT_SUCCESS(FatLoadFile(fname, &data, &size, &fat_info))) {
             KeLog("[io]   NtCreateFile: '%s' not found\n", fname);
             status = STATUS_OBJECT_NAME_NOT_FOUND;
         } else {
@@ -125,6 +130,8 @@ UINT64 NtCreateFile(UINT64 *a)
                 f->Data = data;
                 f->Size = size;
                 f->Position = 0;
+                f->FatWriteDate = fat_info.WriteDate;
+                f->FatWriteTime = fat_info.WriteTime;
                 status = ObCreateHandle(obj, GENERIC_ALL, &h);
                 ObDereferenceObject(obj);
                 KeLog("[io]   NtCreateFile('%s') -> handle %p (%lu bytes)\n",
@@ -215,4 +222,68 @@ UINT64 NtWriteFile(UINT64 *a)
 UINT64 NtClose(UINT64 *a)
 {
     return (UINT64)ObCloseHandle((HANDLE)a[0]);
+}
+
+/* Private minimal handle query used to build Win32 file-information APIs. */
+UINT64 NtQueryFileInfo(UINT64 *a)
+{
+    NTOS_FILE_INFO *out = (NTOS_FILE_INFO *)a[1];
+    if (!MmProbeForWrite((UINT64)out, sizeof(*out)))
+        return (UINT64)STATUS_ACCESS_VIOLATION;
+
+    POBJECT obj;
+    NTSTATUS status = ObReferenceObjectByHandle((HANDLE)a[0], 0,
+                                                 g_file_type, &obj);
+    if (!NT_SUCCESS(status))
+        return (UINT64)status;
+
+    FILE_OBJECT *file = (FILE_OBJECT *)obj;
+    out->Size = file->Size;
+    out->Position = file->Position;
+    out->Attributes = file->Kind == FileKindDisk ? 0x20 : 0;
+    out->IsConsole = file->Kind == FileKindConsole;
+    out->FatWriteDate = file->FatWriteDate;
+    out->FatWriteTime = file->FatWriteTime;
+    out->Reserved = 0;
+    ObDereferenceObject(obj);
+    return (UINT64)STATUS_SUCCESS;
+}
+
+UINT64 NtSetFilePosition(UINT64 *a)
+{
+    UINT64 *new_position = (UINT64 *)a[2];
+    if (new_position &&
+        !MmProbeForWrite((UINT64)new_position, sizeof(*new_position)))
+        return (UINT64)STATUS_ACCESS_VIOLATION;
+
+    POBJECT obj;
+    NTSTATUS status = ObReferenceObjectByHandle((HANDLE)a[0], 0,
+                                                 g_file_type, &obj);
+    if (!NT_SUCCESS(status))
+        return (UINT64)status;
+
+    FILE_OBJECT *file = (FILE_OBJECT *)obj;
+    if (file->Kind != FileKindDisk) {
+        ObDereferenceObject(obj);
+        return (UINT64)STATUS_INVALID_PARAMETER;
+    }
+    file->Position = (SIZE_T)a[1];
+    if (new_position)
+        *new_position = file->Position;
+    ObDereferenceObject(obj);
+    return (UINT64)STATUS_SUCCESS;
+}
+
+/* NTOS-private primitive used by kernel32's FindFirst/FindNext facade until
+ * directory File objects and the full NtQueryDirectoryFile contract exist. */
+UINT64 NtEnumerateRootFiles(UINT64 *a)
+{
+    FAT_FIND_DATA *out = (FAT_FIND_DATA *)a[1];
+    if (!MmProbeForWrite((UINT64)out, sizeof(*out)))
+        return (UINT64)STATUS_ACCESS_VIOLATION;
+    NTSTATUS status = FatEnumerateRoot((UINT32)a[0], out);
+    if (NT_SUCCESS(status))
+        KeLog("[io]   enumerate root[%u] -> %s (%u bytes)\n",
+              (unsigned)a[0], out->Name, (unsigned)out->Size);
+    return (UINT64)status;
 }

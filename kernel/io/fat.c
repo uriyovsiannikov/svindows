@@ -1,9 +1,8 @@
 /*
  * io/fat.c - a read-only FAT32 driver.
  *
- * Parses the BPB, walks the root directory for an 8.3 name, and follows the
- * cluster chain to read a file into a pool buffer. Just enough to load the
- * executables off a disk image.
+ * Parses the BPB, walks the root directory with VFAT long-file-name support,
+ * and follows cluster chains to read files into pool buffers.
  */
 #include <ntos/io.h>
 #include <ntos/ex.h>
@@ -47,6 +46,17 @@ typedef struct PACKED _FAT_DIRENT {
     UINT16 FirstClusterLow;
     UINT32 FileSize;
 } FAT_DIRENT;
+
+typedef struct PACKED _FAT_LFN_ENTRY {
+    UINT8  Order;
+    UINT16 Name1[5];
+    UINT8  Attr;
+    UINT8  Type;
+    UINT8  Checksum;
+    UINT16 Name2[6];
+    UINT16 FirstClusterLow;
+    UINT16 Name3[2];
+} FAT_LFN_ENTRY;
 
 #define ATTR_LONG_NAME 0x0F
 #define FAT_EOC        0x0FFFFFF8u
@@ -133,8 +143,41 @@ NTSTATUS FatMount(void)
 }
 
 /* Search the directory chain starting at `dir_cluster` for `name83`. */
-static BOOLEAN fat_find(UINT32 dir_cluster, const UINT8 name83[11],
-                        UINT32 *out_cluster, UINT32 *out_size)
+static BOOLEAN name_equal_ci(const char *a, const char *b)
+{
+    while (*a && *b) {
+        char ca = *a++, cb = *b++;
+        if (ca >= 'A' && ca <= 'Z') ca += 'a' - 'A';
+        if (cb >= 'A' && cb <= 'Z') cb += 'a' - 'A';
+        if (ca != cb)
+            return FALSE;
+    }
+    return (BOOLEAN)(*a == *b);
+}
+
+static void lfn_put_fragment(char out[260], const FAT_LFN_ENTRY *lfn)
+{
+    UINT32 ordinal = lfn->Order & 0x1f;
+    if (!ordinal || ordinal > 20)
+        return;
+    UINT32 pos = (ordinal - 1) * 13;
+    UINT16 chars[13];
+    for (int i = 0; i < 5; i++) chars[i] = lfn->Name1[i];
+    for (int i = 0; i < 6; i++) chars[5 + i] = lfn->Name2[i];
+    for (int i = 0; i < 2; i++) chars[11 + i] = lfn->Name3[i];
+    for (int i = 0; i < 13 && pos + (UINT32)i < 259; i++) {
+        UINT16 c = chars[i];
+        if (c == 0x0000) {
+            out[pos + i] = 0;
+            break;
+        }
+        if (c != 0xffff)
+            out[pos + i] = c <= 0x7f ? (char)c : '?';
+    }
+}
+
+static BOOLEAN fat_find(UINT32 dir_cluster, const char *name,
+                        FAT_DIRENT *out_entry)
 {
     UINT8 *cluster_buf = ExAllocatePoolWithTag(NonPagedPool,
                                                g_fat.BytesPerCluster, 'taF');
@@ -142,6 +185,11 @@ static BOOLEAN fat_find(UINT32 dir_cluster, const UINT8 name83[11],
         return FALSE;
 
     BOOLEAN found = FALSE;
+    UINT8 name83[11];
+    to_83(name, name83);
+    char long_name[260];
+    BOOLEAN have_lfn = FALSE;
+    memset(long_name, 0, sizeof(long_name));
     UINT32 cluster = dir_cluster;
     while (cluster < FAT_EOC && !found) {
         if (!AtaReadSectors(cluster_to_lba(cluster),
@@ -154,15 +202,27 @@ static BOOLEAN fat_find(UINT32 dir_cluster, const UINT8 name83[11],
             FAT_DIRENT *e = &ents[i];
             if (e->Name[0] == 0x00)
                 goto done; /* end of directory */
-            if (e->Name[0] == 0xE5 || e->Attr == ATTR_LONG_NAME)
+            if (e->Name[0] == 0xE5) {
+                have_lfn = FALSE;
                 continue;
-            if (memcmp(e->Name, name83, 11) == 0) {
-                *out_cluster = ((UINT32)e->FirstClusterHigh << 16) |
-                               e->FirstClusterLow;
-                *out_size = e->FileSize;
+            }
+            if (e->Attr == ATTR_LONG_NAME) {
+                FAT_LFN_ENTRY *lfn = (FAT_LFN_ENTRY *)e;
+                if (lfn->Order & 0x40) {
+                    memset(long_name, 0, sizeof(long_name));
+                    have_lfn = TRUE;
+                }
+                if (have_lfn)
+                    lfn_put_fragment(long_name, lfn);
+                continue;
+            }
+            if ((have_lfn && name_equal_ci(long_name, name)) ||
+                memcmp(e->Name, name83, 11) == 0) {
+                *out_entry = *e;
                 found = TRUE;
                 break;
             }
+            have_lfn = FALSE;
         }
         cluster = fat_next_cluster(cluster);
     }
@@ -171,17 +231,105 @@ done:
     return found;
 }
 
-NTSTATUS FatLoadFile(const char *name, void **out_buffer, SIZE_T *out_size)
+static void from_83(const UINT8 in[11], char out[13])
+{
+    int n = 0;
+    for (int i = 0; i < 8 && in[i] != ' '; i++)
+        out[n++] = (char)in[i];
+    if (in[8] != ' ') {
+        out[n++] = '.';
+        for (int i = 8; i < 11 && in[i] != ' '; i++)
+            out[n++] = (char)in[i];
+    }
+    out[n] = 0;
+}
+
+NTSTATUS FatEnumerateRoot(UINT32 wanted, FAT_FIND_DATA *out)
+{
+    if (!g_fat.Mounted || !out)
+        return STATUS_DEVICE_NOT_READY;
+
+    UINT8 *buf = ExAllocatePoolWithTag(NonPagedPool, g_fat.BytesPerCluster,
+                                       'neF');
+    if (!buf)
+        return STATUS_NO_MEMORY;
+
+    UINT32 seen = 0;
+    char long_name[260];
+    BOOLEAN have_lfn = FALSE;
+    memset(long_name, 0, sizeof(long_name));
+    UINT32 cluster = g_fat.RootCluster;
+    while (cluster < FAT_EOC) {
+        if (!AtaReadSectors(cluster_to_lba(cluster),
+                            (UINT8)g_fat.SectorsPerCluster, buf)) {
+            ExFreePool(buf);
+            return STATUS_DEVICE_NOT_READY;
+        }
+        FAT_DIRENT *entries = (FAT_DIRENT *)buf;
+        UINT32 count = g_fat.BytesPerCluster / sizeof(FAT_DIRENT);
+        for (UINT32 i = 0; i < count; i++) {
+            FAT_DIRENT *e = &entries[i];
+            if (e->Name[0] == 0x00) {
+                ExFreePool(buf);
+                return STATUS_OBJECT_NAME_NOT_FOUND;
+            }
+            if (e->Name[0] == 0xE5) {
+                have_lfn = FALSE;
+                continue;
+            }
+            if (e->Attr == ATTR_LONG_NAME) {
+                FAT_LFN_ENTRY *lfn = (FAT_LFN_ENTRY *)e;
+                if (lfn->Order & 0x40) {
+                    memset(long_name, 0, sizeof(long_name));
+                    have_lfn = TRUE;
+                }
+                if (have_lfn)
+                    lfn_put_fragment(long_name, lfn);
+                continue;
+            }
+            /* Volume labels and directories are not regular search results in
+             * this root-only first cut. */
+            if ((e->Attr & 0x18) != 0) {
+                have_lfn = FALSE;
+                continue;
+            }
+            if (seen++ != wanted)
+                goto next_entry;
+            if (have_lfn) {
+                UINT32 j = 0;
+                for (; long_name[j] && j < sizeof(out->Name) - 1; j++)
+                    out->Name[j] = long_name[j];
+                out->Name[j] = 0;
+            } else {
+                from_83(e->Name, out->Name);
+            }
+            out->Size = e->FileSize;
+            out->Attributes = e->Attr;
+            out->WriteDate = e->WriteDate;
+            out->WriteTime = e->WriteTime;
+            ExFreePool(buf);
+            return STATUS_SUCCESS;
+next_entry:
+            have_lfn = FALSE;
+        }
+        cluster = fat_next_cluster(cluster);
+    }
+    ExFreePool(buf);
+    return STATUS_OBJECT_NAME_NOT_FOUND;
+}
+
+NTSTATUS FatLoadFile(const char *name, void **out_buffer, SIZE_T *out_size,
+                     FAT_FIND_DATA *out_info)
 {
     if (!g_fat.Mounted)
         return STATUS_DEVICE_NOT_READY;
 
-    UINT8 name83[11];
-    to_83(name, name83);
-
-    UINT32 cluster, size;
-    if (!fat_find(g_fat.RootCluster, name83, &cluster, &size))
+    FAT_DIRENT entry;
+    if (!fat_find(g_fat.RootCluster, name, &entry))
         return STATUS_OBJECT_NAME_NOT_FOUND;
+    UINT32 cluster = ((UINT32)entry.FirstClusterHigh << 16) |
+                     entry.FirstClusterLow;
+    UINT32 size = entry.FileSize;
 
     void *buffer = ExAllocatePoolWithTag(NonPagedPool, size ? size : 1, 'liF');
     if (!buffer)
@@ -213,6 +361,16 @@ NTSTATUS FatLoadFile(const char *name, void **out_buffer, SIZE_T *out_size)
     ExFreePool(chunk);
     *out_buffer = buffer;
     *out_size = size;
+    if (out_info) {
+        UINT32 i = 0;
+        for (; name[i] && i < sizeof(out_info->Name) - 1; i++)
+            out_info->Name[i] = name[i];
+        out_info->Name[i] = 0;
+        out_info->Size = entry.FileSize;
+        out_info->Attributes = entry.Attr;
+        out_info->WriteDate = entry.WriteDate;
+        out_info->WriteTime = entry.WriteTime;
+    }
     KeLog("[io]   loaded '%s' (%lu bytes) from disk\n", name, (unsigned long)size);
     return STATUS_SUCCESS;
 }
