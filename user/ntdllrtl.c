@@ -984,12 +984,21 @@ NTSTATUS RtlGetLastNtStatus(void)
 /* fallback paths instead of treating garbage as a valid context.      */
 /* ------------------------------------------------------------------ */
 
+/*
+ * There is no side-by-side store in this system, so no name ever resolves to
+ * a manifest section. The canonical answer real ntdll gives for that case is
+ * STATUS_SXS_SECTION_NOT_FOUND: user32's class-name capture accepts exactly
+ * this status (or a fully successful lookup) -- any other negative status is
+ * treated as a broken activation context and fails RegisterClass silently.
+ */
+#define STATUS_SXS_SECTION_NOT_FOUND 0xC0150008
+
 NTSTATUS RtlFindActivationContextSectionString(ULONG flags, const void *guid,
                                                ULONG section, const void *name,
                                                void *data)
 {
     (void)flags; (void)guid; (void)section; (void)name; (void)data;
-    return STATUS_NOT_FOUND;
+    return STATUS_SXS_SECTION_NOT_FOUND;
 }
 
 NTSTATUS RtlActivateActivationContextUnsafeFast(void *cookie, void *ctx)

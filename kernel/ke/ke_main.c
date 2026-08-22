@@ -49,9 +49,8 @@ static void DemoWorker(PVOID context)
     KeLog("   [kthread %s] finished\n", name);
 }
 
-/* The input thread keeps the hardware queues alive for the future USER32 input
- * path. The framebuffer cursor remains a low-level pointer primitive, not a
- * kernel-drawn shell or desktop. */
+/* The input thread bridges the hardware queues into the USER message queues;
+ * drawing the pointer is the shell's job, not the kernel's. */
 static void InputWorker(PVOID context)
 {
     (void)context;
@@ -70,16 +69,13 @@ static void InputWorker(PVOID context)
             }
         }
 
-        /* Redraw the cursor when the mouse has moved. Mask interrupts for the
-         * draw so a preemption can't split the save/restore of the pixels
-         * under the cursor. */
+        /* Forward pointer motion into the USER message queues. The visible
+         * cursor belongs to the shell once it draws one; the kernel no longer
+         * paints its own sprite over the desktop. */
         UINT32 seq = MouseState.Seq;
         if (seq != last_seq) {
             last_seq = seq;
             KiUserQueueMouse(MouseState.X, MouseState.Y, MouseState.Buttons);
-            UINT64 flags = KiIrqSave();
-            GfxMoveCursor(MouseState.X, MouseState.Y);
-            KiIrqRestore(flags);
         }
 
         KeYield();
@@ -279,7 +275,7 @@ void KiSystemStartup(UINT32 magic, UINT32 mbi_phys)
     HalRegisterIrqHandler(0, KeClockTick);
     HalInitializeTimer(100); /* 100 Hz preemption tick */
 
-    /* Input: PS/2 keyboard + mouse, and a thread that drives the cursor. */
+    /* Input: PS/2 keyboard + mouse, feeding the USER message queues. */
     HalInitializeKeyboard();
     HalInitializeMouse();
     if (GfxAvailable())

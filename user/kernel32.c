@@ -1512,33 +1512,6 @@ __declspec(dllexport) void OutputDebugStringW(const WCHAR *text)
 static WCHAR g_atom_names[LOCAL_ATOM_CAPACITY][64];
 static WORD g_atom_count;
 
-__declspec(dllexport) WORD GlobalAddAtomW(const WCHAR *name)
-{
-    if (!name)
-        return 0;
-    for (WORD i = 0; i < g_atom_count; i++) {
-        unsigned j = 0;
-        while (g_atom_names[i][j] && name[j] &&
-               g_atom_names[i][j] == name[j])
-            j++;
-        if (!g_atom_names[i][j] && !name[j])
-            return (WORD)(0xc000 + i);
-    }
-    if (g_atom_count >= LOCAL_ATOM_CAPACITY)
-        return 0;
-    WORD slot = g_atom_count++;
-    unsigned j = 0;
-    for (; name[j] && j < 63; j++)
-        g_atom_names[slot][j] = name[j];
-    g_atom_names[slot][j] = 0;
-    return (WORD)(0xc000 + slot);
-}
-
-__declspec(dllexport) WORD AddAtomW(const WCHAR *name)
-{
-    return GlobalAddAtomW(name);
-}
-
 /* Case-insensitive lookup in the process atom table. */
 static WORD KiFindAtomW(const WCHAR *name)
 {
@@ -1573,6 +1546,28 @@ __declspec(dllexport) WORD GlobalFindAtomW(const WCHAR *name)
 __declspec(dllexport) WORD FindAtomW(const WCHAR *name)
 {
     return KiFindAtomW(name);
+}
+
+__declspec(dllexport) WORD GlobalAddAtomW(const WCHAR *name)
+{
+    if (!name)
+        return 0;
+    for (WORD i = 0; i < g_atom_count; i++) {
+        unsigned j = 0;
+        while (g_atom_names[i][j] && name[j] &&
+               g_atom_names[i][j] == name[j])
+            j++;
+        if (!g_atom_names[i][j] && !name[j])
+            return (WORD)(0xc000 + i);
+    }
+    if (g_atom_count >= LOCAL_ATOM_CAPACITY)
+        return 0;
+    WORD slot = g_atom_count++;
+    unsigned j = 0;
+    for (; name[j] && j < 63; j++)
+        g_atom_names[slot][j] = name[j];
+    g_atom_names[slot][j] = 0;
+    return (WORD)(0xc000 + slot);
 }
 
 /* The A variants see ASCII names; widen in place before the shared lookup. */

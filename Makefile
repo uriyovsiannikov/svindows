@@ -4,7 +4,7 @@
 #   make            build kernel/ntoskrnl.elf (build/ntoskrnl.elf)
 #   make iso        build the bootable ISO (build/ntos.iso)
 #   make run        boot the ISO in QEMU, kernel log on the serial console
-#   make run-gui    same, but keep QEMU's graphical window
+#   make run-gui    graphical boot of the real shell (explorer.exe)
 #   make clean      remove build artifacts
 # ============================================================================
 
@@ -94,7 +94,7 @@ QEMU        := qemu-system-x86_64
 QEMUFLAGS   := -m 256M -no-reboot -no-shutdown -boot d
 QEMUDISK    := -drive file=$(DISK),format=raw,if=ide,index=0,media=disk
 
-.PHONY: all iso run run-gui clean FORCE
+.PHONY: all iso run run-gui run-gui-image clean FORCE
 
 FORCE:
 
@@ -250,7 +250,12 @@ $(ISO): $(KERNEL) boot/grub.cfg
 run: $(ISO) $(DISK)
 	$(QEMU) $(QEMUFLAGS) -cdrom $(ISO) $(QEMUDISK) -serial stdio -display none
 
-run-gui: $(ISO) $(DISK)
+# The graphical boot target runs the shell: explorer.exe comes up on the
+# framebuffer alongside the serial log in the launching terminal.
+run-gui:
+	$(MAKE) PROGRAM=explorer.exe run-gui-image
+
+run-gui-image: $(ISO) $(DISK)
 	$(QEMU) $(QEMUFLAGS) -cdrom $(ISO) $(QEMUDISK) -serial stdio
 
 clean:

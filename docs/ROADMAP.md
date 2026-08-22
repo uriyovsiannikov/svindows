@@ -221,11 +221,32 @@ bottom of the graphics stack and builds up.
       sign-extended-HKEY handling in advapi32, GetNativeSystemInfo reporting
       PROCESSOR_ARCHITECTURE_AMD64 (dwmapi requires it before wiring its
       function table), and user-stack symbolization in trap/terminate dumps.
-- [ ] The remaining explorer blocker: its desktop-thread bootstrap waits for a
-      hand-off flag that the shell's message-window infrastructure must set;
-      needs CreateWindowExW-driven message windows driven end-to-end by the
-      kernel USER layer (class registration → window → posted messages),
-      which is the next milestone toward a visible desktop.
+- [x] **Window classes register end-to-end and the shell windows exist.**
+      The desktop-thread bootstrap now runs the full USER pipeline:
+      `RegisterClassExWOW` fires with real class names — `Worker Window`,
+      `Shell_TrayWnd` (the taskbar), `WorkerW` (the desktop host) — each
+      receiving a `0xC000`-range atom, and `NtUserCreateWindowEx` creates
+      their windows (taskbar HWND 0x10002, WorkerW 0x10003). Unblocking work:
+      the loader routes every `*ntuser*` API-set contract (regular and delay
+      imports) to the genuine user32.dll; kernel32 grew the full atom family
+      (`GlobalAddAtom/Find/GetAtomName` A+W, integer atoms, `*Ex*`) that
+      user32's class-name capture consumes; ntdll answers
+      `RtlFindActivationContextSectionString` with the canonical
+      `STATUS_SXS_SECTION_NOT_FOUND` (any other negative status made user32
+      silently fail every registration); user32's class-flag pair
+      (`0xBC920/0xBD130`) is synced at load so the client class-list walk is
+      skipped; `gdi32!GdiValidateHandle` answers TRUE; per-thread posted-
+      message queues stopped the desktop thread stealing the main thread's
+      hand-off messages; msvcrt gained the CRT leaf surface the inbox shell
+      links (`realloc`, `_lock/_unlock`, math/time, `_s` strings, and
+      `std::exception` under its MSVC-mangled names); and
+      `NtUserChangeWindowMessageFilterEx` grants the taskbar's message
+      filter assertion after WorkerW creation.
+- [ ] The remaining explorer blocker: right after the WorkerW window is
+      created, the SHCORE desktop thread faults on a NULL pointer inside
+      shell32 (a client-side USER query that returns NULL in this system —
+      GetWindowLongPtr/GetClassName-family — needs the getter half of the
+      window-long/property surface plus whatever shell32 reads through it).
 - [ ] A window/compositor model (drawing windows, z-order, dirty rectangles).
 - [ ] `win32k`-style kernel graphics + a `gdi32`/`user32` surface so Win32 GUI
       programs can create windows and paint — the bridge from console programs

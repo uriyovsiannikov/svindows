@@ -12,6 +12,7 @@
  * filesystem by name; a small cache tracks what is already loaded.
  */
 #include <ntos/ldr.h>
+#include <ntos/trace.h>
 #include <ntos/mm.h>
 #include <ntos/ke.h>
 #include <ntos/rtl.h>
@@ -377,7 +378,6 @@ static UINT64 LdrpImportStub(void)
      * data imports but keeps the image loadable rather than failing outright. */
     if (g_stub_next + LDR_STUB_SLOT_SIZE > g_stub_end)
         return g_stub_arena;
-
     UINT64 slot = g_stub_next;
     g_stub_next += LDR_STUB_SLOT_SIZE;
     UINT8 *code = (UINT8 *)slot;
@@ -385,6 +385,93 @@ static UINT64 LdrpImportStub(void)
     code[1] = 0xC0;
     code[2] = 0xC3; /* ret */
     return slot;
+}
+
+static BOOLEAN LdrpNameContains(const char *name, const char *needle)
+{
+    for (; *name; name++) {
+        const char *n = needle, *m = name;
+        while (*n && *m && *n == *m) {
+            n++;
+            m++;
+        }
+        if (!*n)
+            return TRUE;
+    }
+    return FALSE;
+}
+
+/*
+ * Boundary-trace trampoline (see ntos/trace.h): publish the tag, notify the
+ * kernel, restore RCX (the syscall entry moves it to R10), and tail-jump to
+ * the real function. Layout (three arena slots, 48 bytes):
+ *   +0x00  mov dword [rip+rel32], tag     ; C7 05 rel32 imm32
+ *   +0x0A  mov eax, NTOS_TRACE_SYSCALL    ; B8 imm32
+ *   +0x0F  syscall                        ; 0F 05
+ *   +0x11  mov rcx, r10                   ; 49 89 D1
+ *   +0x14  jmp qword [rip+0]              ; FF 25 00000000
+ *   +0x20  target function address
+ *   +0x28  (the tag word itself lives here via the rel32 above)
+ */
+static UINT64 LdrpTraceThunk(UINT32 tag, UINT64 target,
+                                const char *name)
+{
+    if (!LdrpEnsureStubArena() ||
+        g_stub_next + 3 * LDR_STUB_SLOT_SIZE > g_stub_end)
+        return target;
+
+    UINT64 slot = g_stub_next;
+    g_stub_next += 3 * LDR_STUB_SLOT_SIZE;
+    UINT8 *code = (UINT8 *)slot;
+    UINT64 tag_va = NTOS_TRACE_TAG_VA; /* fixed address the kernel probes */
+
+    code[0x00] = 0x49; /* mov r10, rcx: the syscall ABI takes arg1 in r10 */
+    code[0x01] = 0x89;
+    code[0x02] = 0xCA;
+    code[0x03] = 0xC7; /* mov dword [rip+rel32], tag */
+    code[0x04] = 0x05;
+    *(INT32 *)(code + 0x05) = (INT32)(tag_va - (slot + 0x0D));
+    *(UINT32 *)(code + 0x09) = tag;
+    code[0x0D] = 0xB8; /* mov eax, NTOS_TRACE_SYSCALL */
+    *(UINT32 *)(code + 0x0E) = NTOS_TRACE_SYSCALL;
+    code[0x12] = 0x0F; /* syscall */
+    code[0x13] = 0x05;
+    code[0x14] = 0x49; /* mov rcx, r10: restore the caller's arg1 */
+    code[0x15] = 0x89;
+    code[0x16] = 0xD1;
+    code[0x17] = 0xFF; /* jmp qword [rip+0xB] -> target at +0x28 */
+    code[0x18] = 0x25;
+    *(UINT32 *)(code + 0x19) = 0x28 - 0x1D;
+    *(UINT64 *)(code + 0x24) = target; /* mirrored at +0x28 */
+    *(UINT64 *)(code + 0x28) = target;
+    KeLog("[ldr]  trace thunk %s slot=%p target=%p\n", name ? name : "?",
+          (void *)slot, (void *)target);
+    return slot;
+}
+
+/* USER-surface imports wrapped with a boundary trace while the shell bring-up
+ * is being debugged. The tag numbers mirror the kernel's name table. */
+static UINT64 LdrpMaybeTraceImport(const char *dll, const char *name,
+                                   UINT64 addr)
+{
+    struct {
+        const char *Name;
+        UINT32 Tag;
+    } traced[] = {
+        { "RegisterClassW",    NTOS_TRACE_RegisterClassW },
+        { "RegisterClassExW",  NTOS_TRACE_RegisterClassExW },
+        { "CreateWindowExW",   NTOS_TRACE_CreateWindowExW },
+        { "DestroyWindow",     NTOS_TRACE_DestroyWindow },
+        { "PostThreadMessageW", NTOS_TRACE_PostThreadMessageW },
+        { "PostMessageW",      NTOS_TRACE_PostMessageW },
+        /* DefWindowProcW is deliberately NOT wrapped: user32 exports it as a
+         * forwarder to ntdll!NtdllDefWindowProc_W, and substituting an arena
+         * thunk for the forwarded pointer deranges user32's internal class
+         * tables (observed as thunk bytes surfacing in WNDCLASS copies). */
+        { "DispatchMessageW",  NTOS_TRACE_DispatchMessageW },
+    };
+    (void)traced;
+    return addr; /* tracing disabled: arena thunks derange user32 internals */
 }
 
 /* Patch the GuardCF function-pointer variables named by a PE32+ load-config
@@ -423,20 +510,6 @@ static void LdrpInitializeGuardPointers(UINT64 base)
  * without adding another initialization dependency edge. These contracts are
  * consumed late by Shell/OLE and adding a synthetic edge for them creates a
  * cycle that changes the proven USER32/combase attach order. */
-static BOOLEAN LdrpNameContains(const char *name, const char *needle)
-{
-    for (; *name; name++) {
-        const char *n = needle, *m = name;
-        while (*n && *m && *n == *m) {
-            n++;
-            m++;
-        }
-        if (!*n)
-            return TRUE;
-    }
-    return FALSE;
-}
-
 static UINT64 LdrpLateApiSetHost(const char *name)
 {
     /* The USER/GDI surface ships under many contract names (ntuser window,
@@ -494,6 +567,8 @@ static NTSTATUS LdrResolveImports(UINT64 base)
                     (IMAGE_IMPORT_BY_NAME *)(base + (thunk & 0x7FFFFFFF));
                 if (dll_base)
                     addr = LdrGetProcAddress(dll_base, ibn->Name);
+                if (addr)
+                    addr = LdrpMaybeTraceImport(dll, ibn->Name, addr);
                 /* The core COM contract is temporarily hosted by kernel32 for
                  * allocator/bootstrap calls, but object activation must use
                  * the genuine combase implementation once it is loaded. */
@@ -585,6 +660,8 @@ static NTSTATUS LdrResolveDelayImports(UINT64 base)
                     (IMAGE_IMPORT_BY_NAME *)(base + (UINT32)thunk);
                 if (dll_base)
                     addr = LdrGetProcAddress(dll_base, ibn->Name);
+                if (addr)
+                    addr = LdrpMaybeTraceImport(dll, ibn->Name, addr);
                 if (strncmp(dll, "api-ms-win-core-com-",
                             sizeof("api-ms-win-core-com-") - 1) == 0 &&
                     strcmp(ibn->Name, "CoCreateInstance") == 0) {
@@ -669,6 +746,16 @@ static UINT64 LdrpLoadModule(const char *name)
                 sizeof("api-ms-win-storage-exports-") - 1) == 0)
         return LdrpLoadModule("windows.storage.dll");
 
+    /* The classic path/string/registry helper surface ships under shlwapi
+     * contract names; the genuine shlwapi.dll is supplied with the shell and
+     * hosts them (PathFindExtensionW and friends -- shell32 derefs their
+     * results without NULL checks). */
+    if (strncmp(name, "api-ms-win-core-shlwapi-",
+                sizeof("api-ms-win-core-shlwapi-") - 1) == 0 ||
+        strncmp(name, "api-ms-win-shlwapi-",
+                sizeof("api-ms-win-shlwapi-") - 1) == 0)
+        return LdrpLoadModule("shlwapi.dll");
+
     /* Universal CRT contracts are API-set names whose inbox host is
      * ucrtbase.dll. Windows.Storage and the shell use the private/runtime and
      * string families during their worker-thread bootstrap. */
@@ -710,6 +797,39 @@ static UINT64 LdrpLoadModule(const char *name)
         return 0;
 
     remember_module(name, base); /* cache before resolving to break cycles */
+
+    /* Genuine-DLL compatibility patches, applied while the image is still
+     * writable (before LdrpProtectImage). Each is a measured stand-in for a
+     * win32k service the kernel side does not host yet. */
+    if (ci_strcmp(name, "user32.dll") == 0 ||
+        ci_strcmp(name, "USER32.dll") == 0) {
+        /* RegisterClassExWOWW gates its class-name pipeline on
+         * [g_ClassFlagsA(0xBC920)] == [g_ClassFlagsB(0xBD130)]. User32's init
+         * sets the first to 0x7FFF while the second keeps its .data initial
+         * value; only equal flags skip the 15-slot client class-list walk,
+         * whose entries are all zero in this system (no kernel-side system
+         * class pre-registration feeding them). Publishing 0x7FFF in both
+         * makes every string-class registration take the direct capture ->
+         * win32u path, as it does after a real win32k boot. */
+        UINT32 *flags = (UINT32 *)(base + 0xBD130);
+        *flags = 0x7FFF;
+        KeLog("[ldr]  user32 class-flags synced to 0x7fff\n");
+    }
+
+    if (ci_strcmp(name, "gdi32.dll") == 0 ||
+        ci_strcmp(name, "GDI32.dll") == 0) {
+        /* user32!RegisterClassExWOWW validates a brush-handle background by
+         * calling GdiValidateHandle and fails the whole registration when it
+         * reports an invalid handle. The real GDI handle table lives in the
+         * kernel part we do not have; every caller here passes a brush it
+         * just created, so answer TRUE. */
+        UINT64 proc = LdrGetProcAddress(base, "GdiValidateHandle");
+        if (proc) {
+            UINT8 stub[] = { 0xB8, 0x01, 0x00, 0x00, 0x00, 0xC3 };
+            memcpy((void *)proc, stub, sizeof(stub));
+            KeLog("[ldr]  gdi32!GdiValidateHandle -> TRUE stub\n");
+        }
+    }
 
     if (!NT_SUCCESS(LdrResolveImports(base)))
         return 0;

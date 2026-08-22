@@ -1140,3 +1140,55 @@ __declspec(dllexport) const char *msvcrt_exception_what(const msvc_exception *se
 {
     return self->Message ? self->Message : g_exception_what;
 }
+
+/* String comparison the inbox path helpers need; the loader falls back to
+ * this module when ntdll does not export them. */
+__declspec(dllexport) int wcsncmp(const WCHAR *a, const WCHAR *b, SIZE_T n)
+{
+    for (SIZE_T i = 0; i < n; i++) {
+        if (a[i] != b[i])
+            return a[i] < b[i] ? -1 : 1;
+        if (!a[i])
+            return 0;
+    }
+    return 0;
+}
+
+__declspec(dllexport) int strncmp(const char *a, const char *b, SIZE_T n)
+{
+    for (SIZE_T i = 0; i < n; i++) {
+        if (a[i] != b[i])
+            return (unsigned char)a[i] < (unsigned char)b[i] ? -1 : 1;
+        if (!a[i])
+            return 0;
+    }
+    return 0;
+}
+
+__declspec(dllexport) int _wcsnicmp(const WCHAR *a, const WCHAR *b, SIZE_T n)
+{
+    for (SIZE_T i = 0; i < n; i++) {
+        WCHAR ca = a[i], cb = b[i];
+        if (ca >= 'A' && ca <= 'Z') ca += 32;
+        if (cb >= 'A' && cb <= 'Z') cb += 32;
+        if (ca != cb)
+            return ca < cb ? -1 : 1;
+        if (!a[i])
+            return 0;
+    }
+    return 0;
+}
+
+__declspec(dllexport) int _strnicmp(const char *a, const char *b, SIZE_T n)
+{
+    for (SIZE_T i = 0; i < n; i++) {
+        char ca = a[i], cb = b[i];
+        if (ca >= 'A' && ca <= 'Z') ca += 32;
+        if (cb >= 'A' && cb <= 'Z') cb += 32;
+        if (ca != cb)
+            return (unsigned char)ca < (unsigned char)cb ? -1 : 1;
+        if (!a[i])
+            return 0;
+    }
+    return 0;
+}

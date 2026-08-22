@@ -6,6 +6,7 @@
  * ntdll. For now a tiny in-kernel user stub exercises it directly.
  */
 #include <ntos/ke.h>
+#include <ntos/trace.h>
 #include <ntos/mm.h>
 #include <ntos/io.h>
 #include <ntos/ps.h>
@@ -181,6 +182,83 @@ static void KiDumpUserStack(UINT64 rsp)
             rbp = next;
         }
     }
+}
+
+/* NtTraceCall - loader trampoline notification (see ntos/trace.h). Args keep
+ * their positions (r10 holds the original RCX); the trampoline's tag sits at
+ * NTOS_TRACE_TAG_VA and the caller's return address at [user_rsp]. */
+static UINT64 NtTraceCall(UINT64 *a)
+{
+    static const char *const names[] = {
+        NULL,
+        "RegisterClassW",
+        "RegisterClassExW",
+        "CreateWindowExW",
+        "DestroyWindow",
+        "PostThreadMessageW",
+        "PostMessageW",
+        "DefWindowProcW",
+        "DispatchMessageW",
+        "RegisterClassW@entry",
+    };
+    UINT32 tag = 0;
+    if (MmProbeForRead(NTOS_TRACE_TAG_VA, sizeof(UINT32)))
+        tag = *(volatile UINT32 *)NTOS_TRACE_TAG_VA;
+    const char *name = tag < sizeof(names) / sizeof(names[0]) && names[tag]
+                           ? names[tag]
+                           : "?";
+    UINT64 ret = 0;
+    if (MmProbeForRead(g_service_user_rsp, sizeof(UINT64)))
+        ret = *(volatile UINT64 *)g_service_user_rsp;
+    const char *mod = 0;
+    UINT64 base = 0;
+    if (ret && LdrDescribeUserAddress(ret, &mod, &base))
+        KeLog("[trace] %s(a1=%p, a2=%p, a3=%p, a4=%p) from %s+0x%lx\n",
+              name, (void *)a[0], (void *)a[1], (void *)a[2], (void *)a[3],
+              mod, (unsigned long)(ret - base));
+    else
+        KeLog("[trace] %s(a1=%p, a2=%p, a3=%p, a4=%p) from %p\n", name,
+              (void *)a[0], (void *)a[1], (void *)a[2], (void *)a[3],
+              (void *)ret);
+    /* For class registrations, dump the WNDCLASS/EX the caller built: the
+     * class-name pointer (+0x40) is the value the whole client-side pipeline
+     * hinges on. */
+    if ((tag == 1 || tag == 2) && MmProbeForRead(a[0] + 0x40, 8)) {
+        UINT64 cls = *(volatile UINT64 *)(a[0] + 0x40);
+        UINT64 inst = 0, brush = 0;
+        UINT32 style = 0;
+        if (MmProbeForRead(a[0] + 0x18, 8))
+            inst = *(volatile UINT64 *)(a[0] + 0x18);
+        if (MmProbeForRead(a[0] + 0x30, 8))
+            brush = *(volatile UINT64 *)(a[0] + 0x30);
+        if (MmProbeForRead(a[0] + 0x4, 4))
+            style = *(volatile UINT32 *)(a[0] + 0x4);
+        KeLog("[trace]   wcx: style=%lx hInstance=%p hbrBackground=%p lpszClassName=%p\n",
+              (unsigned long)style, (void *)inst, (void *)brush, (void *)cls);
+        if (MmProbeForRead(a[0], 0x50)) {
+            KeLog("[trace]   wcx raw:");
+            for (int off = 0; off < 0x50; off += 8)
+                KeLog(" +%x=%p", off,
+                      (void *)*( (volatile UINT64 *)(a[0] + off)));
+            KeLog("\n");
+        }
+        if (MmProbeForRead(cls, 16)) {
+            WCHAR wname[24];
+            for (int i = 0; i < 23; i++) {
+                UINT16 c = *(volatile UINT16 *)(cls + i * 2);
+                wname[i] = c;
+                if (!c)
+                    break;
+            }
+            wname[23] = 0;
+            char ascii[24];
+            for (int i = 0; i < 23; i++)
+                ascii[i] = wname[i] && wname[i] < 128 ? (char)wname[i] : '?';
+            ascii[wname[23] ? 23 : 0] = 0;
+            KeLog("[trace]   class name: %s\n", ascii);
+        }
+    }
+    return 0;
 }
 
 /* NtTerminateThread - end the calling thread; does not return. */
@@ -1097,6 +1175,18 @@ static UINT64 NtUserCreateWindowEx(UINT64 *a)
     return hwnd;
 }
 
+static UINT64 NtUserChangeWindowMessageFilterEx(UINT64 *a)
+{
+    /* (hwnd, message, action, pCHANGEFILTERSTRUCT): the shell asserts the
+     * taskbar/desktop messages through this gate right after creating the
+     * WorkerW. Grant the request and report the filtered-allowed state. */
+    UINT64 *out = (UINT64 *)a[3];
+    if (out && MmProbeForWrite((UINT64)out, sizeof(UINT64))) {
+        out[0] = 4; /* cbSize (DWORD) + status STATUS_SUCCESS (DWORD) */
+    }
+    return 1;
+}
+
 static UINT64 NtUserDestroyWindow(UINT64 *a)
 {
     UINT16 slot = (UINT16)(a[0] & 0xFFFF);
@@ -1182,6 +1272,7 @@ static KI_SERVICE KiServiceTable[NTOS_MAX_SYSCALL];
 #define SN_NtCreateSemaphore        0xF8
 #define SN_NtReleaseSemaphore       0xF9
 #define SN_NtQueryInformationProcess 0xFA
+#define SN_NtTraceCall           0xFB
 
 /* win32u.dll service numbers from the matching Windows 10 user-mode build. */
 #define SN_NtUserGetThreadState         0x1003
@@ -1248,6 +1339,7 @@ static KI_SERVICE KiServiceTable[NTOS_MAX_SYSCALL];
 #define SN_NtUserCallTwoParam           0x102D
 #define SN_NtUserSetWindowLong          0x105E
 #define SN_NtUserSetWindowLongPtr       0x1471
+#define SN_NtUserChangeWindowMessageFilterEx 0x134A
 
 void KiInitializeServiceTable(void)
 {
@@ -1279,6 +1371,7 @@ void KiInitializeServiceTable(void)
     KiServiceTable[SN_NtCreateSemaphore]        = NtCreateSemaphore;
     KiServiceTable[SN_NtReleaseSemaphore]       = NtReleaseSemaphore;
     KiServiceTable[SN_NtQueryInformationProcess] = NtQueryInformationProcess;
+    KiServiceTable[SN_NtTraceCall] = NtTraceCall;
     KiServiceTable[SN_NtUserGetThreadState] = NtUserGetThreadState;
     KiServiceTable[SN_NtUserPeekMessage] = NtUserPeekMessage;
     KiServiceTable[SN_NtUserCallOneParam] = NtUserCallOneParam;
@@ -1345,6 +1438,8 @@ void KiInitializeServiceTable(void)
     KiServiceTable[SN_NtUserCallTwoParam] = NtUserCallTwoParam;
     KiServiceTable[SN_NtUserSetWindowLong] = NtUserSetWindowLong;
     KiServiceTable[SN_NtUserSetWindowLongPtr] = NtUserSetWindowLong;
+    KiServiceTable[SN_NtUserChangeWindowMessageFilterEx] =
+        NtUserChangeWindowMessageFilterEx;
 }
 
 UINT64 KiSystemServiceDispatch(UINT64 number, UINT64 *reg_args, UINT64 user_rsp)
