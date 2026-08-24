@@ -11,7 +11,8 @@
 #include <ntos/io.h>
 #include <ntos/ps.h>
 #include <ntos/ldr.h>
-#include <ntos/cm.h>
+#include <ntos/io.h>
+#include <ntos/gfx.h>
 #include <ntos/rtl.h>
 #include <nt/ntdef.h>
 #include <nt/ntstatus.h>
@@ -1361,6 +1362,145 @@ static UINT64 NtUserSetWindowLong(UINT64 *a)
         return (UINT64)old;
     return 0;
 }
+/* ------------------------------------------------------------------ */
+/* win32k-lite: paint the shell windows on the framebuffer            */
+/* ------------------------------------------------------------------ */
+/* There is no compositor yet; the kernel classifies the shell's own
+ * windows by class name and paints simple rectangles for them. Enough to
+ * make "the desktop is up" visible: WorkerW fills the screen (wallpaper),
+ * Shell_TrayWnd becomes the taskbar strip, everything else is a plain
+ * surface. Painting happens on create/show/hide/move so ring-3 state
+ * changes become visible without any client-side drawing. */
+
+#define WINPAINT_NONE     0
+#define WINPAINT_DESKTOP  1
+#define WINPAINT_TASKBAR  2
+#define WINPAINT_GENERIC  3
+#define WINPAINT_SLOTS    128
+
+static UINT8  g_win_kind[WINPAINT_SLOTS];
+static INT32  g_win_x[WINPAINT_SLOTS], g_win_y[WINPAINT_SLOTS];
+static UINT32 g_win_w[WINPAINT_SLOTS], g_win_h[WINPAINT_SLOTS];
+
+static BOOLEAN KiClassNameIs(const WCHAR *name, const char *ascii)
+{
+    UINT32 i = 0;
+    for (; ascii[i]; i++)
+        if (name[i] != (WCHAR)(UINT8)ascii[i])
+            return FALSE;
+    return name[i] == 0;
+}
+
+static void KiPaintWindowBySlot(UINT16 slot)
+{
+    UINT32 style = *(volatile UINT32 *)(PROCESS_USER_OBJECT_ARENA_VA +
+                                        (UINT64)slot * 0x200 + WND_STYLE_OFF);
+    if (!(style & WS_VISIBLE_))
+        return;
+
+    UINT32 sw = GfxFramebuffer.Width, sh = GfxFramebuffer.Height;
+
+    if (g_win_kind[slot] == WINPAINT_DESKTOP) {
+        GfxFillRect(0, 0, sw, sh, GfxColor(0x0e, 0x2a, 0x47));
+        return;
+    }
+    if (g_win_kind[slot] == WINPAINT_TASKBAR) {
+        UINT32 h = g_win_h[slot] ? g_win_h[slot] : 40;
+        if (h > sh / 3)
+            h = 40;
+        UINT32 y = sh - h;
+        GfxFillRect(0, y, sw, h, GfxColor(0x1f, 0x1f, 0x1f));
+        GfxFillRect(0, y, sw, 2, GfxColor(0x00, 0x78, 0xd7));
+        GfxFillRect(0, y + 2, 48, h - 2, GfxColor(0x2d, 0x2d, 0x2d));
+        GfxDrawString(14, y + (h - GFX_FONT_H) / 2 + 1, "NTOS",
+                      GfxColor(0xff, 0xff, 0xff), GfxColor(0x2d, 0x2d, 0x2d));
+        return;
+    }
+
+    /* Generic top-level window: a plain surface with a border. */
+    {
+    INT32 x = g_win_x[slot], y = g_win_y[slot];
+    UINT32 w = g_win_w[slot], h = g_win_h[slot];
+    if ((UINT32)x >= sw || (UINT32)y >= sh || !w || !h)
+        return;
+    if (x + (INT32)w > (INT32)sw)
+        w = sw - (UINT32)x;
+    if (y + (INT32)h > (INT32)sh)
+        h = sh - (UINT32)y;
+    GfxFillRect((UINT32)x, (UINT32)y, w, h, GfxColor(0xf0, 0xf0, 0xf0));
+    GfxFillRect((UINT32)x, (UINT32)y, w, 1, GfxColor(0x10, 0x10, 0x10));
+    GfxFillRect((UINT32)x, (UINT32)y, 1, h, GfxColor(0x10, 0x10, 0x10));
+    }
+}
+
+static void KiRepaintAll(void);
+static UINT64 NtUserShowWindow(UINT64 *a)
+{
+    UINT16 slot = (UINT16)(a[0] & 0xFFFF);
+    if (slot && slot < 256) {
+        UINT64 window = PROCESS_USER_OBJECT_ARENA_VA + (UINT64)slot * 0x200;
+        if (MmProbeForWrite(window + WND_STYLE_OFF, sizeof(UINT32))) {
+            UINT32 *style = (UINT32 *)(window + WND_STYLE_OFF);
+            UINT32 cmd = (UINT32)a[1] & 0xF;
+            if (cmd == 0) /* SW_HIDE */
+                *style &= ~WS_VISIBLE_;
+            else
+                *style |= WS_VISIBLE_;
+        }
+    }
+    KiRepaintAll();
+    return 1;
+}
+
+static UINT64 NtUserSetWindowPos(UINT64 *a)
+{
+    /* (hwnd, x, y, cx, cy, insertAfter, flags...) with SWP_NOMOVE=0x2 and
+     * SWP_NOSIZE=0x1; SWP_SHOWWINDOW (0x40) / SWP_HIDEWINDOW (0x80). */
+    UINT32 flags = (UINT32)a[6];
+    UINT16 slot = (UINT16)(a[0] & 0xFFFF);
+    if (slot && slot < WINPAINT_SLOTS && g_win_kind[slot]) {
+        if (!(flags & 0x2)) {
+            g_win_x[slot] = (INT32)a[1];
+            g_win_y[slot] = (INT32)a[2];
+        }
+        if (!(flags & 0x1)) {
+            g_win_w[slot] = (UINT32)a[3];
+            g_win_h[slot] = (UINT32)a[4];
+        }
+    }
+    if (flags & 0xC0) {
+        if (slot && slot < 256) {
+            UINT64 window = PROCESS_USER_OBJECT_ARENA_VA +
+                            (UINT64)slot * 0x200;
+            if (MmProbeForWrite(window + WND_STYLE_OFF, sizeof(UINT32))) {
+                UINT32 *style = (UINT32 *)(window + WND_STYLE_OFF);
+                if (flags & 0x40)
+                    *style |= WS_VISIBLE_;
+                if (flags & 0x80)
+                    *style &= ~WS_VISIBLE_;
+            }
+        }
+    }
+    KiRepaintAll();
+    return 1;
+}
+
+/* Full-screen repaint in creation order, with the desktop underneath. */
+static void KiRepaintAll(void)
+{
+    if (!GfxAvailable())
+        return;
+    for (UINT16 slot = 1; slot < WINPAINT_SLOTS; slot++) {
+        if (g_win_kind[slot] == WINPAINT_DESKTOP &&
+            (*(volatile UINT32 *)(PROCESS_USER_OBJECT_ARENA_VA +
+                                  (UINT64)slot * 0x200 + WND_STYLE_OFF)) &
+                WS_VISIBLE_)
+            KiPaintWindowBySlot(slot);
+    }
+    for (UINT16 slot = 1; slot < WINPAINT_SLOTS; slot++)
+        KiPaintWindowBySlot(slot);
+}
+
 
 /* ShowWindow(hwnd, cmd): keep the client-side style's WS_VISIBLE bit in
  * sync, which is what IsWindowVisible (and the shell's readiness checks)

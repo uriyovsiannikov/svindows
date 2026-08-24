@@ -50,6 +50,10 @@ static BOOLEAN pool_grow(SIZE_T need)
             return FALSE;
     }
     g_heap_end += want;
+    KeLog("[ex]   grow +%lu KiB -> arena %lu KiB (in-use %lu)\n",
+          (unsigned long)(want >> 10),
+          (unsigned long)((g_heap_end - MM_KERNEL_HEAP_BASE) >> 10),
+          (unsigned long)g_bytes_in_use);
 
     /* If the current tail is free, just extend it; otherwise append a node. */
     if (g_tail && g_tail->free) {
@@ -125,8 +129,20 @@ PVOID ExAllocatePoolWithTag(POOL_TYPE type, SIZE_T size, ULONG tag)
             }
         }
         /* No fit: grow the arena and try once more. */
-        if (!pool_grow(need))
+        if (!pool_grow(need)) {
+            static UINT8 logged;
+            if (!logged) {
+                logged = 1;
+                KeLog("[ex]   pool exhausted: in-use %lu KiB, arena %lu KiB, "
+                      "want %lu bytes (tag '%c%c%c%c')\n",
+                      (unsigned long)(g_bytes_in_use >> 10),
+                      (unsigned long)((g_heap_end - MM_KERNEL_HEAP_BASE) >> 10),
+                      (unsigned long)size,
+                      (char)(tag & 0xff), (char)((tag >> 8) & 0xff),
+                      (char)((tag >> 16) & 0xff), (char)((tag >> 24) & 0xff));
+            }
             break;
+        }
     }
     return NULL;
 }
