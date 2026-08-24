@@ -26,6 +26,17 @@ section .text
 extern KiSystemServiceDispatch
 
 global KiSystemCallEntry
+; KTHREAD field offsets for the callback redirect (see ke.h; _Static_asserts in
+; ke/syscall.c fail the build when this table drifts). KPCR+16 holds
+; CurrentThread.
+%define KTH_USER_RIP      0xAC0
+%define KTH_USER_RSP      0xAC8
+%define KTH_USER_RFLAGS   0xAD0
+%define KTH_CB_RIP        0xAD8
+%define KTH_CB_RSP        0xAE0
+%define KTH_CB_FLAGS      0xAE8
+%define KTH_REDIRECT      0xB29
+
 KiSystemCallEntry:
     swapgs                        ; GS -> kernel KPCR
     mov     [gs:0], rsp           ; momentary scratch for the user RSP
@@ -44,6 +55,16 @@ KiSystemCallEntry:
     ; R12-R15 are preserved automatically by the C dispatcher.)
     push    rdi
     push    rsi
+
+    ; Mirror the user trap frame into the KTHREAD so in-service callbacks can
+    ; redirect the return path. R11 and RDI are scratch here (their user values
+    ; were just pushed); RAX must survive: it carries the service number.
+    mov     r11, [gs:16]          ; CurrentThread
+    mov     [r11+KTH_USER_RIP], rcx
+    mov     rdi, [rsp+0x10]       ; user RFLAGS (pushed above)
+    mov     [r11+KTH_USER_RFLAGS], rdi
+    mov     rdi, [rsp+0x20]       ; user RSP (pushed above)
+    mov     [r11+KTH_USER_RSP], rdi
 
     ; Put the four register arguments in an array on the kernel stack, and hand
     ; the C dispatcher the user RSP so it can gather any stack arguments safely
@@ -69,6 +90,22 @@ KiSystemCallEntry:
 
     pop     rsi                   ; restore caller's RSI
     pop     rdi                   ; restore caller's RDI
+    ; A kernel->user callback armed a one-shot redirect: send this sysret into
+    ; the callback trampoline instead of the original caller. R11 is scratch
+    ; until the normal path reloads the user RFLAGS into it below, and RAX (the
+    ; service's return value) passes through untouched.
+    mov     r11, [gs:16]          ; CurrentThread
+    cmp     byte [r11+KTH_REDIRECT], 1
+    jne     .return_normal
+    mov     byte [r11+KTH_REDIRECT], 0
+    add     rsp, 24               ; drop this frame's RFLAGS/RIP/RSP
+    mov     rcx, [r11+KTH_CB_RIP]
+    mov     rdx, [r11+KTH_CB_RSP]
+    mov     r11, [r11+KTH_CB_FLAGS]
+    mov     rsp, rdx
+    swapgs                        ; GS -> user
+    o64 sysret
+.return_normal:
     pop     r11                   ; user RFLAGS
     pop     rcx                   ; user RIP
     pop     rsp                   ; user RSP (from this thread's kernel stack)

@@ -54,11 +54,28 @@ PKTHREAD PsCreateUserProcess(const char *name, const char *command_line,
         void *page = map_user_rw(PROCESS_USER_SHARED_TABLE_VA + off);
         memset(page, 0, PAGE_SIZE);
     }
+    /* The handle table is win32k-owned: ring 3 only reads it. Write access is
+     * enabled transiently around kernel-side fills (see NtUserCreateWindowEx),
+     * which also turns any client that misbehaves into a named trap instead
+     * of silent corruption. */
+    MmProtectRange(PROCESS_USER_SHARED_TABLE_VA, PROCESS_USER_SHARED_TABLE_SIZE,
+                   FALSE);
     for (UINT64 off = 0; off < PROCESS_USER_OBJECT_ARENA_SIZE;
          off += PAGE_SIZE) {
         void *page = map_user_rw(PROCESS_USER_OBJECT_ARENA_VA + off);
         memset(page, 0, PAGE_SIZE);
     }
+
+    /* USER32's client-side HWND validator (IsWindow and every window API's
+     * fast path) checks the object head against a per-thread desktop-heap
+     * range held in the TEB's Win32ClientInfo (+0x800 block): [+0x820] points
+     * at a {start, end} pair and [+0x828] is the heap delta subtracted from
+     * heads (kept at zero so heads stay absolute). Publish the window arena
+     * as that heap; child threads inherit the block via psobj's memcpy. */
+    UINT64 *range = map_user_rw(PROCESS_USER_OBJECT_ARENA_VA +
+                                PROCESS_USER_OBJECT_ARENA_SIZE);
+    range[0] = PROCESS_USER_OBJECT_ARENA_VA;
+    range[1] = PROCESS_USER_OBJECT_ARENA_VA + PROCESS_USER_OBJECT_ARENA_SIZE;
 
     /* Loader module list, so ring-3 code can enumerate loaded modules. */
     for (UINT64 off = 0; off < PROCESS_LDR_SIZE; off += PAGE_SIZE)
@@ -95,6 +112,12 @@ PKTHREAD PsCreateUserProcess(const char *name, const char *command_line,
     PTEB teb = (PTEB)USER_TEB_VA;
     memset(teb, 0, PROCESS_TEB_SIZE);
     teb->NtTib.Self = (struct _NT_TIB *)USER_TEB_VA;
+    {
+        UINT64 *client = (UINT64 *)((UINT8 *)teb + 0x800);
+        client[0x20] = PROCESS_USER_OBJECT_ARENA_VA +
+                       PROCESS_USER_OBJECT_ARENA_SIZE; /* &range pair */
+        client[0x21] = 0; /* desktop-heap delta: heads stay absolute */
+    }
     teb->NtTib.StackBase = (PVOID)stack_top;
     teb->NtTib.StackLimit = (PVOID)stack_base;
     teb->ProcessEnvironmentBlock = (PVOID)USER_PEB_VA;

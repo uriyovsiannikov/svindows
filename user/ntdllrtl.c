@@ -1507,3 +1507,103 @@ __attribute__((noinline)) void LdrpRegisterWowHandlers(void)
         return;
     }
 }
+
+/*
+ * ------------------------------------------------------------------------
+ * DefWindowProc
+ * ------------------------------------------------------------------------
+ * USER32 exports DefWindowProcW/A as forwarders to NTDLL.NtdllDefWindowProc_W
+ * /_A, so the default window procedure genuinely lives here. Returning zero
+ * for everything (the previous stub) is wrong in a way that breaks window
+ * creation outright: WM_NCCREATE's documented default is TRUE, and win32k
+ * aborts CreateWindowEx when the class procedure -- which forwards the
+ * message here -- answers FALSE. The results below are the documented
+ * defaults; messages with a zero default fall through the switch.
+ */
+typedef unsigned long long ULONG_PTR;
+typedef long long          LONG_PTR;
+
+#define WM_CREATE                 0x0001
+#define WM_DESTROY                0x0002
+#define WM_SETREDRAW              0x000B
+#define WM_SETTEXT                0x000C
+#define WM_GETTEXT                0x000D
+#define WM_GETTEXTLENGTH          0x000E
+#define WM_ERASEBKGND             0x0014
+#define WM_QUERYENDSESSION        0x0011
+#define WM_QUERYOPEN              0x0013
+#define WM_SHOWWINDOW             0x0018
+#define WM_SETCURSOR              0x0020
+#define WM_MOUSEACTIVATE          0x0021
+#define WM_NCCREATE               0x0081
+#define WM_NCDESTROY              0x0082
+#define WM_NCCALCSIZE             0x0083
+#define WM_NCHITTEST              0x0084
+#define WM_NCACTIVATE             0x0086
+#define WM_GETDLGCODE             0x0087
+#define WM_NOTIFYFORMAT           0x0055
+#define WM_DEVICECHANGE           0x0219
+#define WM_INPUTLANGCHANGEREQUEST 0x0050
+#define WM_QUERYUISTATE           0x0129
+#define WM_CTLCOLORMSGBOX         0x0132
+#define WM_CTLCOLORSTATIC         0x0138
+
+#define HTCLIENT      1
+#define MA_ACTIVATE   1
+#define NFR_UNICODE   2
+
+LONG_PTR NtdllDefWindowProc_W(HANDLE hwnd, UINT msg,
+                                                    ULONG_PTR wparam,
+                                                    LONG_PTR lparam)
+{
+    (void)hwnd;
+    (void)wparam;
+    (void)lparam;
+
+    switch (msg) {
+    /* Creation: a FALSE here cancels the window. */
+    case WM_NCCREATE:
+        return TRUE;
+
+    /* Queries whose "nobody handled it" answer is affirmative. */
+    case WM_NCACTIVATE:
+    case WM_QUERYENDSESSION:
+    case WM_QUERYOPEN:
+    case WM_SETCURSOR:
+    case WM_SETTEXT:
+    case WM_ERASEBKGND:
+    case WM_DEVICECHANGE:
+    case WM_INPUTLANGCHANGEREQUEST:
+        return TRUE;
+
+    case WM_NCHITTEST:
+        /* No non-client frame is tracked yet: every hit is in the client
+         * area, which is the answer for a borderless window anyway. */
+        return HTCLIENT;
+
+    case WM_MOUSEACTIVATE:
+        return MA_ACTIVATE;
+
+    case WM_NOTIFYFORMAT:
+        /* Every window in this system is a Unicode window. */
+        return NFR_UNICODE;
+
+    /* The CTLCOLOR family answers with a brush; no GDI stock brushes exist
+     * yet, so the honest answer stays NULL rather than a fake handle. */
+    case WM_CTLCOLORMSGBOX:
+    case WM_CTLCOLORSTATIC:
+        return 0;
+
+    /* Everything else -- WM_CREATE, WM_DESTROY, WM_NCDESTROY, WM_NCCALCSIZE,
+     * WM_PAINT, WM_SHOWWINDOW, the WINDOWPOS pair, ... -- defaults to 0. */
+    default:
+        return 0;
+    }
+}
+
+LONG_PTR NtdllDefWindowProc_A(HANDLE hwnd, UINT msg,
+                                                    ULONG_PTR wparam,
+                                                    LONG_PTR lparam)
+{
+    return NtdllDefWindowProc_W(hwnd, msg, wparam, lparam);
+}

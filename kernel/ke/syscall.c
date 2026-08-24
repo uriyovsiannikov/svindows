@@ -56,6 +56,13 @@ static ALWAYS_INLINE UINT64 rdmsr(UINT32 msr)
     return ((UINT64)hi << 32) | lo;
 }
 
+/* The syscall entry stub reaches the current KTHREAD through KPCR+16 (GS
+ * after swapgs), so the scheduler must publish it there on every switch. */
+void KeSetCurrentThread(PKTHREAD thread)
+{
+    g_kpcr.CurrentThread = thread;
+}
+
 void KeSetKernelStack(UINT64 kernel_rsp)
 {
     g_kpcr.KernelRsp = kernel_rsp;
@@ -455,8 +462,6 @@ typedef UINT64 (*KI_SERVICE)(UINT64 *args);
 /* Minimal win32k/USER services used by the genuine win32u.dll.        */
 /* ------------------------------------------------------------------ */
 
-static UINT32 g_next_registered_message = 0xC000;
-
 typedef struct _USER_MSG_LOCAL {
     UINT64 Hwnd;
     UINT32 Message;
@@ -490,6 +495,11 @@ typedef struct _USER_MSG_QUEUE {
     USER_MSG_LOCAL Msgs[USER_MESSAGE_QUEUE_CAPACITY];
     UINT32 Head;
     UINT32 Tail;
+    /* The thread's USER "input event": a notification event ring 3 waits on
+     * through MsgWaitForMultipleObjects. Created lazily the first time the
+     * thread asks for it, signaled while the queue is non-empty. */
+    PKEVENT InputEvent;
+    HANDLE  InputEventHandle;
 } USER_MSG_QUEUE;
 
 static USER_MSG_QUEUE g_user_thread_queues[USER_MAX_THREAD_QUEUES];
@@ -501,14 +511,27 @@ static USER_MSG_QUEUE *KiUserQueueForThread(UINT32 thread_id)
     return &g_user_thread_queues[thread_id - 1];
 }
 
+/* Keep a thread's input event in step with its queue. Called with the queue
+ * already updated; safe from interrupt context (KeSetEvent masks interrupts
+ * and only readies threads). */
+static void KiUserSyncInputEvent(USER_MSG_QUEUE *queue)
+{
+    if (!queue->InputEvent)
+        return;
+    if (queue->Head != queue->Tail)
+        KeSetEvent(queue->InputEvent);
+    else
+        KeResetEvent(queue->InputEvent);
+}
+
 /* Owner thread of each created window slot: input goes to the queue of the
  * thread that created the window, as in win32k. */
-static UINT32 g_window_owner[256];
+static UINT32 g_window_owner[128];
 
 static UINT32 KiUserWindowOwner(UINT64 hwnd)
 {
     UINT16 slot = (UINT16)(hwnd & 0xFFFF);
-    if (!slot || slot >= 256)
+    if (!slot || slot >= 128)
         return 0;
     return g_window_owner[slot];
 }
@@ -545,6 +568,7 @@ static BOOLEAN KiUserEnqueueMessage(UINT64 hwnd, UINT32 message,
     msg->PtX = x;
     msg->PtY = y;
     queue->Head = next;
+    KiUserSyncInputEvent(queue);
     KiIrqRestore(flags);
     return TRUE;
 }
@@ -568,6 +592,7 @@ static BOOLEAN KiUserEnqueueThreadMessage(UINT32 target_tid, UINT32 message,
     msg->LParam = lparam;
     msg->Time = (UINT32)(KeGetTickCount() * 10);
     queue->Head = next;
+    KiUserSyncInputEvent(queue);
     KiIrqRestore(flags);
     return TRUE;
 }
@@ -618,10 +643,118 @@ static BOOLEAN KiUserTakeMessage(USER_MSG_LOCAL *out, BOOLEAN remove)
         return FALSE;
     }
     *out = queue->Msgs[queue->Tail];
-    if (remove)
+    if (remove) {
         queue->Tail = (queue->Tail + 1) % USER_MESSAGE_QUEUE_CAPACITY;
+        KiUserSyncInputEvent(queue);
+    }
     KiIrqRestore(flags);
     return TRUE;
+}
+
+/* ------------------------------------------------------------------ */
+/* The USER atom table                                                */
+/* ------------------------------------------------------------------ */
+/*
+ * Window classes, registered window messages and GlobalAddAtom-style names all
+ * draw from one 0xC000..0xFFFF atom space per window station, exactly as in
+ * win32k: RegisterClassEx interns the class name, RegisterWindowMessage interns
+ * the message name (so two components asking for the same string get the same
+ * id), and GetAtomName maps an atom back to its string. Keeping them in
+ * separate counters -- which is what this file did -- hands the same number to
+ * a class and a message, and leaves GetAtomName unable to answer at all, which
+ * is what stopped the shell from creating its worker window.
+ */
+#define USER_MAX_ATOMS   192
+#define USER_ATOM_CHARS  64
+#define USER_ATOM_FIRST  0xC000
+
+typedef struct _USER_ATOM_ENTRY {
+    WCHAR  Name[USER_ATOM_CHARS];
+    UINT16 Atom;
+} USER_ATOM_ENTRY;
+
+static USER_ATOM_ENTRY g_user_atoms[USER_MAX_ATOMS];
+static UINT32 g_user_atom_count;
+
+/* Copy a NUL-terminated wide string from user memory (bounded). */
+static UINT32 KiCopyWideFromUser(const WCHAR *src, WCHAR *dst, UINT32 cap)
+{
+    if (!src || !MmProbeForRead((UINT64)src, sizeof(WCHAR)))
+        return 0;
+    for (UINT32 i = 0; i + 1 < cap; i++) {
+        if (!MmProbeForRead((UINT64)(src + i), sizeof(WCHAR))) {
+            dst[i] = 0;
+            return i;
+        }
+        dst[i] = src[i];
+        if (!src[i])
+            return i;
+    }
+    dst[cap - 1] = 0;
+    return cap - 1;
+}
+
+static BOOLEAN KiWideEqual(const WCHAR *a, const WCHAR *b)
+{
+    while (*a && *b) {
+        WCHAR ca = *a++, cb = *b++;
+        if (ca >= 'A' && ca <= 'Z') ca += 32;
+        if (cb >= 'A' && cb <= 'Z') cb += 32;
+        if (ca != cb)
+            return FALSE;
+    }
+    return *a == *b;
+}
+
+/* Intern `name`, returning its (stable) atom. 0 when the table is full. */
+static UINT16 KiUserAddAtom(const WCHAR *name)
+{
+    if (!name || !name[0])
+        return 0;
+    for (UINT32 i = 0; i < g_user_atom_count; i++)
+        if (KiWideEqual(g_user_atoms[i].Name, name))
+            return g_user_atoms[i].Atom;
+    if (g_user_atom_count >= USER_MAX_ATOMS)
+        return 0;
+    USER_ATOM_ENTRY *entry = &g_user_atoms[g_user_atom_count];
+    UINT32 n = 0;
+    for (; n + 1 < USER_ATOM_CHARS && name[n]; n++)
+        entry->Name[n] = name[n];
+    entry->Name[n] = 0;
+    entry->Atom = (UINT16)(USER_ATOM_FIRST + g_user_atom_count);
+    g_user_atom_count++;
+    return entry->Atom;
+}
+
+static const WCHAR *KiUserAtomName(UINT16 atom)
+{
+    for (UINT32 i = 0; i < g_user_atom_count; i++)
+        if (g_user_atoms[i].Atom == atom)
+            return g_user_atoms[i].Name;
+    return NULL;
+}
+
+/* Capture the atom name a win32u service was handed: modern win32u passes a
+ * counted UNICODE_STRING, older forms a bare pointer. */
+static UINT32 KiCaptureAtomName(UINT64 arg, WCHAR *out, UINT32 cap)
+{
+    if (!arg)
+        return 0;
+    /* A UNICODE_STRING starts with two USHORTs whose values are small and
+     * whose Buffer is a valid pointer; a bare string starts with characters. */
+    if (MmProbeForRead(arg, sizeof(UNICODE_STRING))) {
+        const UNICODE_STRING *ustr = (const UNICODE_STRING *)arg;
+        UINT32 chars = ustr->Length / sizeof(WCHAR);
+        if (chars && chars < cap && ustr->MaximumLength >= ustr->Length &&
+            ustr->Buffer &&
+            MmProbeForRead((UINT64)ustr->Buffer,
+                           (UINT64)chars * sizeof(WCHAR))) {
+            memcpy(out, ustr->Buffer, (UINT64)chars * sizeof(WCHAR));
+            out[chars] = 0;
+            return chars;
+        }
+    }
+    return KiCopyWideFromUser((const WCHAR *)arg, out, cap);
 }
 
 static UINT64 NtUserGetThreadState(UINT64 *a)
@@ -634,12 +767,21 @@ static UINT64 NtUserGetThreadState(UINT64 *a)
 
 static UINT64 NtUserRegisterWindowMessage(UINT64 *a)
 {
-    /* Registered window-message IDs occupy 0xC000..0xFFFF.  Keep allocation
-     * stable for the process; string interning will be added with the USER
-     * atom table. */
-    UINT32 atom = g_next_registered_message;
-    if (g_next_registered_message < 0xFFFF)
-        g_next_registered_message++;
+    /* NtUserRegisterWindowMessage(PUNICODE_STRING MessageName): the id must be
+     * the same for every caller that asks for the same string, which is what
+     * makes cross-process shell messages (Shell_TrayWnd's "TaskbarCreated" and
+     * friends) work at all. Interning gives that for free. */
+    WCHAR name[USER_ATOM_CHARS];
+    UINT32 n = KiCaptureAtomName(a[0], name, USER_ATOM_CHARS);
+    if (!n)
+        return 0;
+    UINT16 atom = KiUserAddAtom(name);
+    char ascii[USER_ATOM_CHARS];
+    UINT32 j = 0;
+    for (; j < n && j + 1 < sizeof(ascii); j++)
+        ascii[j] = (char)name[j];
+    ascii[j] = 0;
+    KeLog("[user] RegisterWindowMessage('%s') -> 0x%x\n", ascii, atom);
     return atom;
 }
 
@@ -720,8 +862,17 @@ static UINT64 NtUserPostThreadMessage(UINT64 *a)
 {
     UINT32 thread_id = (UINT32)a[0];
     UINT32 message = (UINT32)a[1];
-    KeLog("[user] NtUserPostThreadMessage(tid=%u, msg=0x%x, wp=%p, lp=%p)\n",
-          thread_id, message, (void *)a[2], (void *)a[3]);
+    const char *mod = 0;
+    UINT64 base = 0, ret = 0;
+    if (MmProbeForRead(g_service_user_rsp, sizeof(UINT64)))
+        ret = *(volatile UINT64 *)g_service_user_rsp;
+    if (ret && LdrDescribeUserAddress(ret, &mod, &base))
+        KeLog("[user] NtUserPostThreadMessage(tid=%u, msg=0x%x, wp=%p, lp=%p) from %s+0x%lx\n",
+              thread_id, message, (void *)a[2], (void *)a[3], mod,
+              (unsigned long)(ret - base));
+    else
+        KeLog("[user] NtUserPostThreadMessage(tid=%u, msg=0x%x, wp=%p, lp=%p)\n",
+              thread_id, message, (void *)a[2], (void *)a[3]);
 
     /* The message is delivered to the target thread's own queue; only that
      * thread's GetMessage/PeekMessage can consume it, preserving per-thread
@@ -730,10 +881,78 @@ static UINT64 NtUserPostThreadMessage(UINT64 *a)
                                       (INT64)a[3]);
 }
 
+/* NtUserCallOneParam routine indices used by the shell (the win32u
+ * apfnSimpleCall table of the supplied build). */
+#define ONEPARAM_GETINPUTEVENT 0x32
+
+/*
+ * The thread's USER input event. user32's MsgWaitForMultipleObjectsEx checks
+ * the client-side wake bits first and, when nothing is pending, asks win32k
+ * for the handle of the event that fires when a message matching the wake mask
+ * arrives, then waits on it together with the caller's handles. Returning NULL
+ * (the old stub) makes that function fail, and the shell retries forever.
+ *
+ * The wake mask is packed into the argument as (flags << 16) | mask; the
+ * per-thread queue is not filtered by message class yet, so any queued message
+ * wakes the wait -- a superset, which a message loop handles correctly because
+ * it re-checks its own queue after waking.
+ */
+static UINT64 KiUserGetInputEvent(void)
+{
+    PKTHREAD thread = KeGetCurrentThread();
+    USER_MSG_QUEUE *queue =
+        KiUserQueueForThread(thread ? thread->ThreadId : 0);
+    if (!queue)
+        return 0;
+    if (!queue->InputEvent) {
+        PKEVENT event = NULL;
+        HANDLE handle = NULL;
+        if (!NT_SUCCESS(PsCreateNotificationEvent(&event, &handle)))
+            return 0;
+        queue->InputEvent = event;
+        queue->InputEventHandle = handle;
+        KeLog("[user] input event for thread %lu -> handle %p\n",
+              (unsigned long)(thread ? thread->ThreadId : 0), (void *)handle);
+    }
+    /* Publish the current queue state before the caller waits, so a message
+     * that arrived before this call is not missed. */
+    UINT64 flags = KiIrqSave();
+    KiUserSyncInputEvent(queue);
+    KiIrqRestore(flags);
+    return (UINT64)queue->InputEventHandle;
+}
+
+/* NtUserCallNoParam(routine): the routine index is the only argument, so it
+ * cannot share NtUserCallOneParam's handler (which reads it from a[1]). */
+static UINT64 NtUserCallNoParam(UINT64 *a)
+{
+    static UINT8 seen[256];
+    UINT64 routine = a[0];
+    if (routine >= 256 || !seen[routine]) {
+        if (routine < 256)
+            seen[routine] = 1;
+        KeLog("[user] NtUserCallNoParam(routine=0x%lx) -> 0\n",
+              (unsigned long)routine);
+    }
+    return 0;
+}
+
 static UINT64 NtUserCallOneParam(UINT64 *a)
 {
-    KeLog("[user] NtUserCallOneParam(value=%p, routine=0x%lx)\n",
-          (void *)a[0], (unsigned long)a[1]);
+    UINT64 routine = a[1];
+
+    if (routine == ONEPARAM_GETINPUTEVENT)
+        return KiUserGetInputEvent();
+
+    /* Log each unimplemented routine once: repeated calls come from polling
+     * loops and would bury the rest of the log. */
+    static UINT8 seen[256];
+    if (routine >= 256 || !seen[routine]) {
+        if (routine < 256)
+            seen[routine] = 1;
+        KeLog("[user] NtUserCallOneParam(value=%p, routine=0x%lx) -> 0\n",
+              (void *)a[0], (unsigned long)routine);
+    }
     return 0;
 }
 
@@ -754,14 +973,50 @@ static UINT64 NtUserGetCaretBlinkTime(UINT64 *a)
 
 static UINT64 NtUserGetAtomName(UINT64 *a)
 {
+    /* (atom, PUNICODE_STRING out) in the modern form; the buffer/capacity pair
+     * is the older one. The shell resolves its own class atom back to a name
+     * before creating the worker window, so answering with an empty string
+     * (what this used to do) silently loses that window. */
     UINT16 atom = (UINT16)a[0];
-    UINT16 *buffer = (UINT16 *)a[1];
+    const WCHAR *name = KiUserAtomName(atom);
+    if (!name) {
+        KeLog("[user] GetAtomName(0x%x) -> unknown\n", atom);
+        return 0;
+    }
+    UINT32 chars = 0;
+    while (name[chars])
+        chars++;
+
+    WCHAR *buffer = (WCHAR *)a[1];
     UINT32 capacity = (UINT32)a[2];
-    KeLog("[user] NtUserGetAtomName(atom=0x%x, out=%p, cap=%u)\n",
-          atom, buffer, capacity);
-    if (buffer && capacity && MmProbeForWrite((UINT64)buffer, sizeof(UINT16)))
-        buffer[0] = 0;
-    return 0;
+    /* UNICODE_STRING form: a[1] points at { Length, MaximumLength, Buffer }
+     * and the count comes from MaximumLength. */
+    if (buffer && !capacity && MmProbeForRead(a[1], sizeof(UNICODE_STRING))) {
+        UNICODE_STRING *ustr = (UNICODE_STRING *)a[1];
+        if (ustr->Buffer && ustr->MaximumLength >= sizeof(WCHAR) &&
+            MmProbeForWrite(a[1], sizeof(UNICODE_STRING))) {
+            UINT32 room = ustr->MaximumLength / sizeof(WCHAR);
+            UINT32 n = chars + 1 > room ? room - 1 : chars;
+            if (!MmProbeForWrite((UINT64)ustr->Buffer,
+                                 (UINT64)(n + 1) * sizeof(WCHAR)))
+                return 0;
+            for (UINT32 i = 0; i < n; i++)
+                ustr->Buffer[i] = name[i];
+            ustr->Buffer[n] = 0;
+            ustr->Length = (UINT16)(n * sizeof(WCHAR));
+            return n;
+        }
+    }
+
+    if (!buffer || !capacity)
+        return 0;
+    UINT32 n = chars + 1 > capacity ? capacity - 1 : chars;
+    if (!MmProbeForWrite((UINT64)buffer, (UINT64)(n + 1) * sizeof(WCHAR)))
+        return 0;
+    for (UINT32 i = 0; i < n; i++)
+        buffer[i] = name[i];
+    buffer[n] = 0;
+    return n;
 }
 
 /* ------------------------------------------------------------------ */
@@ -769,48 +1024,18 @@ static UINT64 NtUserGetAtomName(UINT64 *a)
 /* ------------------------------------------------------------------ */
 
 #define USER_MAX_CLASSES 64
-#define USER_ATOM_FIRST  0xC000
 
 typedef struct _USER_CLASS_LOCAL {
     WCHAR Name[32];
     UINT64 WndProc;
     UINT64 Instance;
     UINT32 Style;
+    UINT32 WndExtra;
     UINT16 Atom;
     BOOLEAN Used;
 } USER_CLASS_LOCAL;
 
 static USER_CLASS_LOCAL g_user_classes[USER_MAX_CLASSES];
-
-/* Copy a NUL-terminated wide string from user memory (bounded). */
-static UINT32 KiCopyWideFromUser(const WCHAR *src, WCHAR *dst, UINT32 cap)
-{
-    if (!src || !MmProbeForRead((UINT64)src, sizeof(WCHAR)))
-        return 0;
-    for (UINT32 i = 0; i + 1 < cap; i++) {
-        if (!MmProbeForRead((UINT64)(src + i), sizeof(WCHAR))) {
-            dst[i] = 0;
-            return i;
-        }
-        dst[i] = src[i];
-        if (!src[i])
-            return i;
-    }
-    dst[cap - 1] = 0;
-    return cap - 1;
-}
-
-static BOOLEAN KiWideEqual(const WCHAR *a, const WCHAR *b)
-{
-    while (*a && *b) {
-        WCHAR ca = *a++, cb = *b++;
-        if (ca >= 'A' && ca <= 'Z') ca += 32;
-        if (cb >= 'A' && cb <= 'Z') cb += 32;
-        if (ca != cb)
-            return FALSE;
-    }
-    return *a == *b;
-}
 
 static USER_CLASS_LOCAL *KiClassByAtom(UINT16 atom)
 {
@@ -873,11 +1098,17 @@ static UINT64 NtUserRegisterClassExWOW(UINT64 *a)
             continue;
         memcpy(g_user_classes[i].Name, local, (n + 1) * sizeof(WCHAR));
         g_user_classes[i].Style = *(const UINT32 *)(wcex + WNDCLASSEX_STYLE);
+        if (MmProbeForRead((UINT64)(wcex + 0x14), sizeof(UINT32)))
+            g_user_classes[i].WndExtra =
+                *(const UINT32 *)(wcex + 0x14);
         g_user_classes[i].WndProc =
             *(const UINT64 *)(wcex + WNDCLASSEX_WNDPROC);
         g_user_classes[i].Instance =
             *(const UINT64 *)(wcex + WNDCLASSEX_HINSTANCE);
-        g_user_classes[i].Atom = (UINT16)(USER_ATOM_FIRST + i);
+        /* The class name is interned in the station atom table, so
+         * GetAtomName/FindAtom answer for it and no registered window message
+         * can be handed the same number. */
+        g_user_classes[i].Atom = KiUserAddAtom(local);
         g_user_classes[i].Used = TRUE;
         char ascii[33];
         UINT32 j = 0;
@@ -1003,13 +1234,104 @@ static UINT64 NtUserRemoveProp(UINT64 *a)
 #define WINDOW_LONG_BASE 0x60
 #define WINDOW_LONG_COUNT 16
 
+/* Offsets inside the client-visible window head that the genuine user32
+ * dereferences directly (decoded from its GWL getter and IsWindowVisible):
+ * style/+0x30, exStyle/+0x34, fnid-state/+0x42, cbWndExtra/+0xE8,
+ * hWndParent/+0x100, WndProc/+0x148, and the window bytes at +0x168. */
+#define WND_STYLE_OFF     0x30
+#define WND_EXSTYLE_OFF   0x34
+#define WND_FNID_OFF      0x42
+#define WND_WND_EXTRA_OFF 0xE8
+#define WND_PARENT_OFF    0x100
+#define WND_WNDPROC_OFF   0x148
+#define WND_WINBYTES_OFF  0x168
+#define WS_VISIBLE_       0x10000000u
+
+/*
+ * NtUserCreateWindowEx receives the class name as a LARGE_STRING (not a
+ * UNICODE_STRING): { ULONG Length; ULONG MaximumLength:31, bAnsi:1;
+ * PVOID Buffer; }. When the caller passed an atom rather than a string,
+ * user32 sets Length = 0 and stuffs the atom into Buffer, which is exactly
+ * what win32k tests. Resolve either form against the class registry.
+ */
+static USER_CLASS_LOCAL *KiClassForCreate(UINT64 class_arg)
+{
+    if (!class_arg)
+        return NULL;
+
+    /* An atom may also arrive directly in the argument slot. */
+    UINT16 atom = 0;
+    if ((class_arg & ~0xFFFFULL) == 0) {
+        atom = (UINT16)class_arg;
+    } else {
+        if (!MmProbeForRead(class_arg, 16))
+            return NULL;
+        UINT32 length = *(const UINT32 *)class_arg;
+        UINT64 buffer = *(const UINT64 *)(class_arg + 8);
+        UINT32 ansi = (*(const UINT32 *)(class_arg + 4)) >> 31;
+
+        if (buffer && (buffer & ~0xFFFFULL) == 0) {
+            atom = (UINT16)buffer; /* atom form: Buffer holds the atom */
+        } else if (length && buffer) {
+            /* String form: match the registered class by name. */
+            WCHAR local[32];
+            UINT32 chars = 0;
+            if (ansi) {
+                UINT32 n = length > 31 ? 31 : length;
+                if (!MmProbeForRead(buffer, n))
+                    return NULL;
+                for (UINT32 i = 0; i < n; i++)
+                    local[i] = (WCHAR)(UINT8)((const char *)buffer)[i];
+                chars = n;
+            } else {
+                UINT32 n = length / 2;
+                if (n > 31)
+                    n = 31;
+                if (!MmProbeForRead(buffer, (UINT64)n * sizeof(WCHAR)))
+                    return NULL;
+                memcpy(local, (const void *)buffer, (UINT64)n * sizeof(WCHAR));
+                chars = n;
+            }
+            local[chars] = 0;
+            for (int i = 0; i < USER_MAX_CLASSES; i++)
+                if (g_user_classes[i].Used &&
+                    KiWideEqual(g_user_classes[i].Name, local))
+                    return &g_user_classes[i];
+            return NULL;
+        }
+    }
+
+    if (!atom)
+        return NULL;
+    for (int i = 0; i < USER_MAX_CLASSES; i++)
+        if (g_user_classes[i].Used && g_user_classes[i].Atom == atom)
+            return &g_user_classes[i];
+    return NULL;
+}
+
+/* Publish the fields client-side user32 reads without a syscall. */
+static void KiPublishWindowState(UINT64 window, UINT32 style, UINT32 exstyle,
+                                 UINT64 parent, USER_CLASS_LOCAL *cls)
+{
+    *(UINT32 *)(window + WND_STYLE_OFF) = style;
+    *(UINT32 *)(window + WND_EXSTYLE_OFF) = exstyle;
+    *(UINT16 *)(window + WND_FNID_OFF) = 0;
+    if (cls) {
+        *(UINT32 *)(window + WND_WND_EXTRA_OFF) = cls->WndExtra;
+        *(UINT64 *)(window + WND_WNDPROC_OFF) = cls->WndProc;
+    } else {
+        *(UINT32 *)(window + WND_WND_EXTRA_OFF) = 0x40;
+    }
+    *(UINT64 *)(window + WND_PARENT_OFF) = parent;
+}
+
 static INT64 KiGetWindowLong(UINT64 hwnd, INT32 index)
 {
     UINT16 slot = (UINT16)(hwnd & 0xFFFF);
-    if (!slot || slot >= 256 || index < -WINDOW_LONG_COUNT)
+    if (!slot || slot >= 128 || index < -WINDOW_LONG_COUNT)
         return 0;
     INT64 *longs = (INT64 *)(PROCESS_USER_OBJECT_ARENA_VA +
-                             (UINT64)slot * 0x100 + WINDOW_LONG_BASE +
+                             (UINT64)slot * 0x200 + WINDOW_LONG_BASE +
                              (UINT64)(-index - 1) * 8);
     if (!MmProbeForRead((UINT64)longs, 8))
         return 0;
@@ -1020,10 +1342,10 @@ static BOOLEAN KiSetWindowLong(UINT64 hwnd, INT32 index, INT64 value,
                                INT64 *old)
 {
     UINT16 slot = (UINT16)(hwnd & 0xFFFF);
-    if (!slot || slot >= 256 || index < -WINDOW_LONG_COUNT)
+    if (!slot || slot >= 128 || index < -WINDOW_LONG_COUNT)
         return FALSE;
     INT64 *longs = (INT64 *)(PROCESS_USER_OBJECT_ARENA_VA +
-                             (UINT64)slot * 0x100 + WINDOW_LONG_BASE +
+                             (UINT64)slot * 0x200 + WINDOW_LONG_BASE +
                              (UINT64)(-index - 1) * 8);
     if (!MmProbeForWrite((UINT64)longs, 8))
         return FALSE;
@@ -1040,8 +1362,45 @@ static UINT64 NtUserSetWindowLong(UINT64 *a)
     return 0;
 }
 
-static UINT64 NtUserShowWindow(UINT64 *a) { return 1; }
-static UINT64 NtUserSetWindowPos(UINT64 *a) { return 1; }
+/* ShowWindow(hwnd, cmd): keep the client-side style's WS_VISIBLE bit in
+ * sync, which is what IsWindowVisible (and the shell's readiness checks)
+ * read directly from the window head. */
+static UINT64 NtUserShowWindow(UINT64 *a)
+{
+    UINT16 slot = (UINT16)(a[0] & 0xFFFF);
+    if (slot && slot < 256) {
+        UINT64 window = PROCESS_USER_OBJECT_ARENA_VA + (UINT64)slot * 0x200;
+        if (MmProbeForWrite(window + WND_STYLE_OFF, sizeof(UINT32))) {
+            UINT32 *style = (UINT32 *)(window + WND_STYLE_OFF);
+            UINT32 cmd = (UINT32)a[1] & 0xF;
+            if (cmd == 0) /* SW_HIDE */
+                *style &= ~WS_VISIBLE_;
+            else
+                *style |= WS_VISIBLE_;
+        }
+    }
+    return 1;
+}
+
+static UINT64 NtUserSetWindowPos(UINT64 *a)
+{
+    /* SWP_SHOWWINDOW (0x40) / SWP_HIDEWINDOW (0x80) in the flags argument. */
+    UINT32 flags = (UINT32)a[7];
+    if (flags & 0xC0) {
+        UINT16 slot = (UINT16)(a[0] & 0xFFFF);
+        if (slot && slot < 256) {
+            UINT64 window = PROCESS_USER_OBJECT_ARENA_VA + (UINT64)slot * 0x200;
+            if (MmProbeForWrite(window + WND_STYLE_OFF, sizeof(UINT32))) {
+                UINT32 *style = (UINT32 *)(window + WND_STYLE_OFF);
+                if (flags & 0x40)
+                    *style |= WS_VISIBLE_;
+                if (flags & 0x80)
+                    *style &= ~WS_VISIBLE_;
+            }
+        }
+    }
+    return 1;
+}
 static UINT64 NtUserMoveWindow(UINT64 *a) { return 1; }
 static UINT64 NtUserInvalidateRect(UINT64 *a) { return 1; }
 static UINT64 NtUserUpdateWindow(UINT64 *a) { return 1; }
@@ -1050,8 +1409,83 @@ static UINT64 NtUserPostMessage(UINT64 *a)
     return KiUserEnqueueMessage(a[0], (UINT32)a[1], a[2], (INT64)a[3],
                                 0, 0);
 }
-static UINT64 NtUserMessageCall(UINT64 *a) { return 0; }
-static UINT64 NtUserDispatchMessage(UINT64 *a) { return 0; }
+
+/* Continuation codes carried in KTHREAD.CallbackContinue. */
+#define CB_CONT_CREATE_NCCREATE 1 /* next: WM_NCCREATE result handling   */
+#define CB_CONT_CREATE_WMCREATE 2 /* next: WM_CREATE result handling     */
+#define CB_CONT_SIMPLE          3 /* hand the WndProc result to the caller */
+
+/* The kernel->user callback machinery is defined further down (it needs the
+ * loader's stub arena); the message services here are its first users. */
+static BOOLEAN KiStartUserCallback(UINT64 target, UINT64 a1, UINT64 a2,
+                                   UINT64 a3, UINT64 a4, UINT64 continuation,
+                                   UINT64 window, UINT64 msg, UINT64 lparam);
+
+/*
+ * Synchronous message delivery: SendMessage (NtUserMessageCall) and the message
+ * pump's DispatchMessage both have to run the target window's procedure and
+ * hand its LRESULT back to the caller. Both used to return 0 without calling
+ * anything, which silently voided every SendMessage the shell makes -- and a
+ * message pump whose DispatchMessage does nothing can never advance a window's
+ * state machine. Both now go through the kernel->user callback path that
+ * window creation already uses.
+ */
+static UINT64 KiWindowProcOf(UINT64 hwnd)
+{
+    UINT16 slot = (UINT16)(hwnd & 0xFFFF);
+    if (!slot || slot >= 128)
+        return 0;
+    UINT64 window = PROCESS_USER_OBJECT_ARENA_VA + (UINT64)slot * 0x200;
+    if (!MmProbeForRead(window + WND_WNDPROC_OFF, sizeof(UINT64)))
+        return 0;
+    return *(volatile UINT64 *)(window + WND_WNDPROC_OFF);
+}
+
+/* Returns TRUE when the callback was armed; the result then reaches the caller
+ * through NtCallbackReturn, so the service's own return value is unused. */
+static BOOLEAN KiStartUserCallback(UINT64 target, UINT64 a1, UINT64 a2,
+                                   UINT64 a3, UINT64 a4, UINT64 continuation,
+                                   UINT64 window, UINT64 msg, UINT64 lparam);
+static BOOLEAN KiSendToWindowProc(UINT64 hwnd, UINT32 message, UINT64 wparam,
+                                  INT64 lparam)
+{
+    UINT64 proc = KiWindowProcOf(hwnd);
+    if (!proc)
+        return FALSE;
+    return KiStartUserCallback(proc, hwnd, message, wparam, (UINT64)lparam,
+                               CB_CONT_SIMPLE, hwnd, message, (UINT64)lparam);
+}
+
+static UINT64 NtUserMessageCall(UINT64 *a)
+{
+    UINT64 hwnd = a[0];
+    UINT32 message = (UINT32)a[1];
+    UINT32 type = (UINT32)a[5];
+
+    static UINT8 logged;
+    if (logged < 32) {
+        logged++;
+        KeLog("[user] MessageCall(hwnd=%p, msg=0x%x, wp=%p, lp=%p, "
+              "type=0x%lx)\n", (void *)hwnd, (unsigned)message, (void *)a[2],
+              (void *)a[3], (unsigned long)type);
+    }
+    if (KiSendToWindowProc(hwnd, message, a[2], (INT64)a[3]))
+        return 0; /* the WndProc's result is returned by NtCallbackReturn */
+    return 0;
+}
+
+static UINT64 NtUserDispatchMessage(UINT64 *a)
+{
+    const USER_MSG_LOCAL *msg = (const USER_MSG_LOCAL *)a[0];
+    if (!msg || !MmProbeForRead((UINT64)msg, sizeof(*msg)))
+        return 0;
+    /* A thread message (hwnd == 0) has no window procedure to run. */
+    if (!msg->Hwnd)
+        return 0;
+    if (KiSendToWindowProc(msg->Hwnd, msg->Message, msg->WParam, msg->LParam))
+        return 0;
+    return 0;
+}
 static UINT64 NtUserTranslateMessage(UINT64 *a) { return 0; }
 static UINT64 NtUserTranslateAccelerator(UINT64 *a) { return 0; }
 static UINT64 NtUserSetTimer(UINT64 *a) { return 1; }
@@ -1110,6 +1544,280 @@ static UINT64 NtUserBeginPaint(UINT64 *a)
 }
 static UINT64 NtUserEndPaint(UINT64 *a) { return 1; }
 
+/* ------------------------------------------------------------------ */
+/* Kernel -> user callbacks (the KiUserCallbackDispatcher equivalent)  */
+/* ------------------------------------------------------------------ */
+
+#define SN_NtCallbackReturn 0xFC
+
+/* The entry stub (syscall_entry.asm) hardcodes these KTHREAD offsets; fail
+ * the build rather than silently corrupting the wrong fields when the struct
+ * changes. */
+#define KI_OFFSETOF(type, field) __builtin_offsetof(type, field)
+_Static_assert(KI_OFFSETOF(KTHREAD, UserRip) == 0xAC0, "KTH_USER_RIP");
+_Static_assert(KI_OFFSETOF(KTHREAD, UserRsp) == 0xAC8, "KTH_USER_RSP");
+_Static_assert(KI_OFFSETOF(KTHREAD, UserRflags) == 0xAD0, "KTH_USER_RFLAGS");
+_Static_assert(KI_OFFSETOF(KTHREAD, CallbackRip) == 0xAD8, "KTH_CB_RIP");
+_Static_assert(KI_OFFSETOF(KTHREAD, CallbackRsp) == 0xAE0, "KTH_CB_RSP");
+_Static_assert(KI_OFFSETOF(KTHREAD, CallbackFlags) == 0xAE8, "KTH_CB_FLAGS");
+_Static_assert(KI_OFFSETOF(KTHREAD, RedirectPending) == 0xB29, "KTH_REDIRECT");
+
+/* Dedicated stacks for WndProc callbacks. The user thread stacks are only
+ * 64 KiB and a shell WndProc's call chain is far deeper than the space below
+ * the arming syscall's RSP, so each callback chain claims its own 128 KiB
+ * slot here (lazily mapped). Slots are never returned: windows are few and
+ * creations are clustered at bootstrap. */
+#define CALLBACK_STACK_ARENA_VA  0x0000000001400000ULL
+#define CALLBACK_STACK_SLOTS     16
+#define CALLBACK_STACK_SLOT_SIZE 0x0000000000020000ULL
+static UINT8 g_callback_stack_next;
+
+/* Claim a dedicated callback stack; returns its top (0 when out of slots). */
+static UINT64 KiClaimCallbackStack(void)
+{
+    if (g_callback_stack_next >= CALLBACK_STACK_SLOTS)
+        return 0;
+    UINT64 slot = g_callback_stack_next++;
+    UINT64 base = CALLBACK_STACK_ARENA_VA + slot * CALLBACK_STACK_SLOT_SIZE;
+    for (UINT64 off = 0; off < CALLBACK_STACK_SLOT_SIZE; off += PAGE_SIZE) {
+        UINT64 pa = MmAllocatePage();
+        if (pa == MM_INVALID_PHYS)
+            return 0;
+        MmMapPage(base + off, pa, PTE_USER | PTE_WRITE);
+    }
+    return base + CALLBACK_STACK_SLOT_SIZE;
+}
+
+
+/*
+ * Build a per-call trampoline in the stub arena that loads the four Win64
+ * argument registers with immediates, provides home space, calls the target
+ * (WndProc), and re-enters the kernel with the result:
+ *   movabs rax, imm ; mov rcx/rdx/r8/r9, rax  (x4)
+ *   sub rsp, 0x28 ; movabs rax, target ; call rax
+ *   mov r10, rax ; mov eax, 0xFC ; syscall ; int3
+ */
+static UINT64 LdrpBuildCallbackThunk(UINT64 target, UINT64 a1, UINT64 a2,
+                                     UINT64 a3, UINT64 a4)
+{
+    extern BOOLEAN LdrpEnsureStubArenaPub(void);
+    if (!LdrpEnsureStubArenaPub())
+        return 0;
+    extern UINT64 LdrStubArenaBase(void), LdrStubArenaNext(UINT64 bytes),
+        LdrStubArenaEnd(void);
+    UINT64 need = 5 * 16;
+    if (LdrStubArenaNext(0) + need > LdrStubArenaEnd())
+        return 0;
+    UINT64 slot = LdrStubArenaNext(need);
+    UINT8 *code = (UINT8 *)slot;
+    UINT64 args[4] = {a1, a2, a3, a4};
+    int o = 0;
+    for (int i = 0; i < 4; i++) {
+        code[o++] = 0x48; code[o++] = 0xB8; /* movabs rax, imm64 */
+        *(UINT64 *)(code + o) = args[i];
+        o += 8;
+        /* mov rcx/rdx, rax is 48 89 C1/C2; r8/r9 need REX.B: 49 89 C0/C1. */
+        code[o++] = (UINT8)(i < 2 ? 0x48 : 0x49);
+        code[o++] = 0x89;
+        code[o++] = (UINT8)(i < 2 ? 0xC1 + i : 0xC0 + (i - 2));
+    }
+    code[o++] = 0x48; code[o++] = 0x83; code[o++] = 0xEC; /* sub rsp, 0x28 */
+    code[o++] = 0x28;
+    code[o++] = 0x48; code[o++] = 0xB8; /* movabs rax, target */
+    *(UINT64 *)(code + o) = target;
+    o += 8;
+    code[o++] = 0xFF; code[o++] = 0xD0; /* call rax */
+    /* mov r10, rax: REX.W|REX.B (49) with reg=rax, rm=r10. (0x4C 0x89 0xC2
+     * would be `mov rdx, r8` -- the result would never reach the kernel.) */
+    code[o++] = 0x49; code[o++] = 0x89; code[o++] = 0xC2;
+    code[o++] = 0xB8; *(UINT32 *)(code + o) = SN_NtCallbackReturn; o += 4;
+    code[o++] = 0x0F; code[o++] = 0x05; /* syscall */
+    code[o++] = 0xCC;
+    return slot;
+}
+
+/*
+ * Arm a kernel->user callback for this thread: the current sysret (belonging
+ * to the service calling this) is redirected into a trampoline that invokes
+ * the WndProc. The first callback of a chain captures the original caller's
+ * frame in Orig*; the final redirect (KiFinishCallbackToCaller) restores it
+ * with the callback's result in RAX. Returns FALSE when a callback chain is
+ * already in flight (nested callbacks are refused; the caller falls back to a
+ * default result).
+ */
+static BOOLEAN KiStartUserCallback(UINT64 target, UINT64 a1, UINT64 a2,
+                                   UINT64 a3, UINT64 a4, UINT64 continuation,
+                                   UINT64 window, UINT64 msg, UINT64 lparam)
+{
+    PKTHREAD t = KeGetCurrentThread();
+    if (!t || t->CallbackActive || t->RedirectPending)
+        return FALSE;
+
+    UINT64 thunk = LdrpBuildCallbackThunk(target, a1, a2, a3, a4);
+    UINT64 stack = thunk ? KiClaimCallbackStack() : 0;
+    if (!thunk || !stack)
+        return FALSE;
+
+    t->OrigRip = t->UserRip;
+    t->OrigRsp = t->UserRsp;
+    t->OrigRflags = t->UserRflags;
+    /* Snapshot the caller's return address so the final redirect can put it
+     * back even if ring-3 scribbled on the (now dead) stack slot meanwhile. */
+    t->SavedReturnAddress =
+        MmProbeForRead(t->UserRsp, sizeof(UINT64))
+            ? *(volatile UINT64 *)t->UserRsp : 0;
+    t->CallbackActive = 1;
+
+    /* RSP%16==8 at the trampoline entry: its `sub rsp,0x28` + `call` then put
+     * the WndProc entry at the Win64-conventional RSP%16==8 with the home
+     * space mapped. */
+    t->CallbackRip = thunk;
+    t->CallbackRsp = ((stack - 0x100) & ~0xFULL) | 8;
+    t->CallbackFlags = 0x202; /* IF set */
+    t->CallbackContinue = continuation;
+    t->CallbackWindow = window;
+    t->CallbackMsg = msg;
+    t->CallbackLParam = lparam;
+    t->RedirectPending = 1;
+    KeLog("[user]   callback -> proc %p msg 0x%lx hwnd %p (thunk %p rsp %p, "
+          "caller %p)\n", (void *)target, (unsigned long)a2, (void *)a1,
+          (void *)thunk, (void *)t->CallbackRsp, (void *)t->OrigRip);
+    return TRUE;
+}
+
+/*
+ * Chain the next callback of a creation (WM_NCCREATE -> WM_CREATE) from inside
+ * NtCallbackReturn's dispatch. The original frame stays captured in Orig*;
+ * only the redirect target changes.
+ */
+static BOOLEAN KiChainUserCallback(UINT64 target, UINT64 a1, UINT64 a2,
+                                   UINT64 a3, UINT64 a4, UINT64 continuation,
+                                   UINT64 window, UINT64 msg, UINT64 lparam)
+{
+    PKTHREAD t = KeGetCurrentThread();
+    if (!t || !t->CallbackActive || t->RedirectPending)
+        return FALSE;
+
+    UINT64 thunk = LdrpBuildCallbackThunk(target, a1, a2, a3, a4);
+    if (!thunk)
+        return FALSE;
+
+    t->CallbackRip = thunk;
+    t->CallbackRsp = (t->CallbackRsp & ~0xFULL) | 8; /* reuse the stack slot */
+    t->CallbackContinue = continuation;
+    t->CallbackWindow = window;
+    t->CallbackMsg = msg;
+    t->CallbackLParam = lparam;
+    t->RedirectPending = 1;
+    return TRUE;
+}
+
+/* End of the chain: the next (and last) redirect sends the sysret back to the
+ * original caller with `result` in RAX, exactly as the arming service would
+ * have returned it. */
+static void KiFinishCallbackToCaller(PKTHREAD t, UINT64 result)
+{
+    (void)result;
+    t->CallbackRip = t->OrigRip;
+    t->CallbackRsp = t->OrigRsp;
+    t->CallbackFlags = t->OrigRflags;
+    /* Enforce the win32k guarantee: the interrupted frame is returned to
+     * exactly as it was left, including the slot its stub will `ret`
+     * through. Ring-3 code running between arming and here (this thread's
+     * own WndProc or a sibling thread's stray write) must not be able to
+     * derail the return path. */
+    if (t->SavedReturnAddress &&
+        MmProbeForWrite(t->OrigRsp, sizeof(UINT64)))
+        *(volatile UINT64 *)t->OrigRsp = t->SavedReturnAddress;
+    t->CallbackContinue = 0;
+    t->CallbackActive = 0;
+    t->RedirectPending = 1;
+}
+
+/* NtCallbackReturn: the trampoline re-entered the kernel with the WndProc
+ * result in R10. Drive the kernel-side continuation state machine. */
+static UINT64 NtCallbackReturn(UINT64 *a)
+{
+    PKTHREAD t = KeGetCurrentThread();
+    if (!t || !t->CallbackActive)
+        return 0;
+    UINT64 result = a[0]; /* r10 */
+    KeLog("[user]   callback return: msg 0x%lx -> %p (cont %lu)\n",
+          (unsigned long)t->CallbackMsg, (void *)result,
+          (unsigned long)t->CallbackContinue);
+
+    if (t->CallbackContinue == CB_CONT_CREATE_NCCREATE) {
+        if (result == 0) {
+            /* WM_NCCREATE refused: fail the creation. */
+            UINT16 slot = (UINT16)(t->CallbackWindow & 0xFFFF);
+            if (slot && slot < 128)
+                g_window_owner[slot] = 0;
+            KiFinishCallbackToCaller(t, 0);
+            return 0; /* CreateWindowExW sees NULL */
+        }
+        /* Continue into WM_CREATE: the window head carries the WndProc. */
+        UINT16 slot = (UINT16)(t->CallbackWindow & 0xFFFF);
+        UINT64 window = PROCESS_USER_OBJECT_ARENA_VA + (UINT64)slot * 0x200;
+        UINT64 proc = 0;
+        if (MmProbeForRead(window + WND_WNDPROC_OFF, 8))
+            proc = *(volatile UINT64 *)(window + WND_WNDPROC_OFF);
+        if (proc && KiChainUserCallback(proc, t->CallbackWindow, 0x0001, 0,
+                                        t->CallbackLParam,
+                                        CB_CONT_CREATE_WMCREATE,
+                                        t->CallbackWindow, 0x0001,
+                                        t->CallbackLParam))
+            return 0; /* redirected again; value unused */
+        KiFinishCallbackToCaller(t, t->CallbackWindow);
+        return t->CallbackWindow;
+    }
+
+    if (t->CallbackContinue == CB_CONT_CREATE_WMCREATE) {
+        UINT16 slot = (UINT16)(t->CallbackWindow & 0xFFFF);
+        if ((INT64)result == -1) {
+            /* WM_CREATE refused: destroy the half-made window. */
+            if (slot && slot < 128)
+                g_window_owner[slot] = 0;
+            KiFinishCallbackToCaller(t, 0);
+            return 0;
+        }
+        KiFinishCallbackToCaller(t, t->CallbackWindow);
+        return t->CallbackWindow;
+    }
+
+    KiFinishCallbackToCaller(t, result);
+    return result;
+}
+
+/* Build the CREATESTRUCTW a WM_NCCREATE/WM_CREATE lParam points at, from the
+ * NtUserCreateWindowEx argument block: (exStyle, class, version, name, style,
+ * x, y, cx, cy, parent, menu, instance, lpParam, ...). x64 layout. */
+static UINT64 KiBuildCreateStruct(const UINT64 *a, UINT64 hwnd)
+{
+    extern BOOLEAN LdrpEnsureStubArenaPub(void);
+    extern UINT64 LdrStubArenaNext(UINT64 bytes), LdrStubArenaEnd(void);
+    if (!LdrpEnsureStubArenaPub() ||
+        LdrStubArenaNext(0) + 0x60 > LdrStubArenaEnd())
+        return 0;
+    UINT64 p = LdrStubArenaNext(0x60);
+    UINT8 *cs = (UINT8 *)p;
+    memset(cs, 0, 0x60);
+    *(UINT64 *)(cs + 0x00) = a[12];      /* lpCreateParams */
+    *(UINT64 *)(cs + 0x08) = a[11];      /* hInstance      */
+    *(UINT64 *)(cs + 0x10) = a[10];      /* hMenu          */
+    *(UINT64 *)(cs + 0x18) = a[9];       /* hwndParent     */
+    *(UINT32 *)(cs + 0x20) = (UINT32)a[8]; /* cy           */
+    *(UINT32 *)(cs + 0x24) = (UINT32)a[7]; /* cx           */
+    *(UINT32 *)(cs + 0x28) = (UINT32)a[6]; /* y            */
+    *(UINT32 *)(cs + 0x2C) = (UINT32)a[5]; /* x            */
+    *(UINT32 *)(cs + 0x30) = (UINT32)a[4]; /* style        */
+    *(UINT64 *)(cs + 0x38) = a[3];       /* lpszName       */
+    *(UINT64 *)(cs + 0x40) = a[1];       /* lpszClass (or atom) */
+    *(UINT64 *)(cs + 0x48) = hwnd;       /* helper: creator's own HWND */
+    KeLog("[user]   CREATESTRUCT @ %p for HWND %p\n", (void *)p,
+          (void *)hwnd);
+    return p;
+}
+
 static UINT64 NtUserCreateWindowEx(UINT64 *a)
 {
     typedef struct _USER_HANDLE_ENTRY_LOCAL {
@@ -1139,7 +1847,7 @@ static UINT64 NtUserCreateWindowEx(UINT64 *a)
           (unsigned long)a[4], (long)a[5], (long)a[6], (long)a[7],
           (long)a[8]);
 
-    if (next_window_index >= 256)
+    if (next_window_index >= 128)
         return 0;
 
     UINT16 index = next_window_index++;
@@ -1148,31 +1856,123 @@ static UINT64 NtUserCreateWindowEx(UINT64 *a)
     USER_HANDLE_ENTRY_LOCAL *entries =
         (USER_HANDLE_ENTRY_LOCAL *)PROCESS_USER_SHARED_TABLE_VA;
     USER_WINDOW_HEAD_LOCAL *window = (USER_WINDOW_HEAD_LOCAL *)(
-        PROCESS_USER_OBJECT_ARENA_VA + (UINT64)index * 0x100);
+        PROCESS_USER_OBJECT_ARENA_VA + (UINT64)index * 0x200);
 
-    memset(window, 0, 0x100);
+    memset(window, 0, 0x200);
     window->Handle = hwnd;
     window->LockCount = 1;
-    window->Self = (UINT64)window;
-
+    /* Flip the shared handle table writable for the kernel-side fill; ring 3
+     * normally sees it read-only (see PsCreateUserProcess). */
+    MmProtectRange(PROCESS_USER_SHARED_TABLE_VA, PROCESS_USER_SHARED_TABLE_SIZE,
+                   TRUE);
     entries[index].Object = (UINT64)window;
     entries[index].Owner = 0;
     entries[index].Type = 1; /* TYPE_WINDOW */
     entries[index].Flags = 0;
     entries[index].Generation = generation;
+    MmProtectRange(PROCESS_USER_SHARED_TABLE_VA, PROCESS_USER_SHARED_TABLE_SIZE,
+                   FALSE);
 
     PKTHREAD creator = KeGetCurrentThread();
     g_window_owner[index] = creator ? creator->ThreadId : 0;
 
-    /* Do not focus Explorer's zero-sized hidden coordination window. Hardware
-     * input remains a thread message until USER creates a visible top-level
-     * window and establishes foreground/focus state. */
-    if (((UINT32)a[4] & 0x10000000U) && (INT32)a[7] > 0 && (INT32)a[8] > 0)
-        g_user_active_hwnd = hwnd;
+    USER_CLASS_LOCAL *cls = KiClassForCreate(a[1]);
+    KiPublishWindowState((UINT64)window, (UINT32)a[4], (UINT32)a[0],
+                         a[9], cls);
+    {
+        char ascii[33];
+        UINT32 j = 0;
+        if (cls)
+            for (; j < 32 && cls->Name[j]; j++)
+                ascii[j] = (char)cls->Name[j];
+        ascii[j] = 0;
+        KeLog("[user]   created HWND %p head %p class '%s' atom 0x%x "
+              "wndproc %p extra %lu\n", (void *)hwnd, (void *)window,
+              cls ? ascii : "<unresolved>", cls ? cls->Atom : 0,
+              (void *)(cls ? cls->WndProc : 0),
+              (unsigned long)(cls ? cls->WndExtra : 0));
+    }
+    if (cls && cls->WndProc) {
+        UINT64 cs = KiBuildCreateStruct(a, hwnd);
+        if (KiStartUserCallback(cls->WndProc, hwnd, 0x0081 /* WM_NCCREATE */,
+                                0, cs, CB_CONT_CREATE_NCCREATE, hwnd,
+                                0x0081, cs))
+            return 0; /* value unused; the callback path returns the HWND */
+    }
 
-    KeLog("[user]   created HWND %p, shared object %p\n",
-          (void *)hwnd, (void *)window);
     return hwnd;
+}
+
+/* RegisterHotKey(hwnd, id, modifiers, vk): the shell registers its Win-key
+ * hotkeys during taskbar bring-up. No hotkey table exists yet, so nothing is
+ * delivered, but the registration itself must succeed -- FALSE is a failure
+ * the shell treats as a broken window station. */
+static UINT64 NtUserRegisterHotKey(UINT64 *a)
+{
+    KeLog("[user] RegisterHotKey(hwnd=%p, id=%ld, mods=0x%lx, vk=0x%lx)\n",
+          (void *)a[0], (long)(INT32)a[1], (unsigned long)(UINT32)a[2],
+          (unsigned long)(UINT32)a[3]);
+    return 1;
+}
+
+static UINT64 NtUserGetObjectInformation(UINT64 *a)
+{
+    /* (handle, index, pvInfo, cbInfo, pcbNeeded) -- GetUserObjectInformationW
+     * reads the name/type/flags of the window station or desktop. Callers
+     * compare the desktop name against L"Default" and expect wide strings; a
+     * NULL pvInfo with pcbNeeded is the documented length-query pattern. */
+    UINT64 handle = a[0];
+    UINT32 index = (UINT32)a[1];
+    WCHAR *out = (WCHAR *)a[2];
+    UINT32 size = (UINT32)a[3];
+    UINT32 *needed = (UINT32 *)a[4];
+
+    KeLog("[user] GetObjectInformation(h=%lu, idx=%lu, out=%p, size=%lu)\n",
+          (unsigned long)(UINT32)handle, (unsigned long)index, (void *)out,
+          (unsigned long)size);
+    BOOLEAN station = (handle == 1 || handle == 4);
+    static const WCHAR name_desktop[] = {'D','e','f','a','u','l','t',0};
+    static const WCHAR name_station[] = {'W','i','n','S','t','a','0',0};
+    static const WCHAR type_desktop[] = {'D','e','s','k','t','o','p',0};
+    static const WCHAR type_station[] =
+        {'W','i','n','d','o','w','S','t','a','t','i','o','n',0};
+    const WCHAR *text = 0;
+    UINT32 bytes = 0;
+    UINT32 flags_word = 0; /* for UOI_FLAGS */
+
+    if (index == 1) { /* UOI_FLAGS: USEROBJECTFLAGS {inherit, reserved, flags} */
+        bytes = 12;
+        flags_word = 1; /* WSF_VISIBLE */
+    } else if (index == 2) { /* UOI_NAME */
+        text = station ? name_station : name_desktop;
+        for (UINT32 i = 0; text[i]; i++)
+            bytes += sizeof(WCHAR);
+        bytes += sizeof(WCHAR);
+    } else if (index == 3) { /* UOI_TYPE */
+        text = station ? type_station : type_desktop;
+        for (UINT32 i = 0; text[i]; i++)
+            bytes += sizeof(WCHAR);
+        bytes += sizeof(WCHAR);
+    } else {
+        return 0;
+    }
+
+    if (needed && MmProbeForWrite((UINT64)needed, sizeof(UINT32)))
+        *needed = bytes;
+    if (!out)
+        return 1; /* length query */
+    if (size < bytes || !MmProbeForWrite((UINT64)out, bytes))
+        return 0;
+    if (index == 1) {
+        UINT32 *words = (UINT32 *)out;
+        words[0] = 0;
+        words[1] = 0;
+        words[2] = flags_word;
+    } else {
+        for (UINT32 i = 0; i * sizeof(WCHAR) < bytes; i++)
+            out[i] = text[i];
+    }
+    return 1;
 }
 
 static UINT64 NtUserChangeWindowMessageFilterEx(UINT64 *a)
@@ -1190,7 +1990,7 @@ static UINT64 NtUserChangeWindowMessageFilterEx(UINT64 *a)
 static UINT64 NtUserDestroyWindow(UINT64 *a)
 {
     UINT16 slot = (UINT16)(a[0] & 0xFFFF);
-    if (slot && slot < 256) {
+    if (slot && slot < 128) {
         g_window_owner[slot] = 0;
         if (g_user_active_hwnd == a[0])
             g_user_active_hwnd = 0;
@@ -1225,9 +2025,25 @@ static UINT64 NtUserGetMessage(UINT64 *a)
         return (UINT64)-1;
 
     USER_MSG_LOCAL msg;
-    while (!KiUserTakeMessage(&msg, TRUE))
-        KeYield();
+    PKTHREAD caller = KeGetCurrentThread();
+    UINT32 tid = caller ? caller->ThreadId : 0;
+    if (!KiUserTakeMessage(&msg, TRUE)) {
+        /* Report the first time each thread parks in GetMessage: an empty
+         * queue with nothing to wake it is the signature of a shell that is
+         * waiting on USER machinery we have not built yet. */
+        static UINT8 parked[USER_MAX_THREAD_QUEUES + 1];
+        if (tid <= USER_MAX_THREAD_QUEUES && !parked[tid]) {
+            parked[tid] = 1;
+            KeLog("[user] GetMessage: thread %lu queue empty, waiting\n",
+                  (unsigned long)tid);
+        }
+        do
+            KeYield();
+        while (!KiUserTakeMessage(&msg, TRUE));
+    }
     *user_msg = msg;
+    KeLog("[user] GetMessage -> msg 0x%x hwnd %p (tid %lu)\n",
+          (unsigned)msg.Message, (void *)msg.Hwnd, (unsigned long)tid);
     return msg.Message == 0x0012 /* WM_QUIT */ ? 0 : 1;
 }
 
@@ -1340,6 +2156,8 @@ static KI_SERVICE KiServiceTable[NTOS_MAX_SYSCALL];
 #define SN_NtUserSetWindowLong          0x105E
 #define SN_NtUserSetWindowLongPtr       0x1471
 #define SN_NtUserChangeWindowMessageFilterEx 0x134A
+#define SN_NtUserGetObjectInformation     0x106E
+#define SN_NtUserRegisterHotKey           0x1403
 
 void KiInitializeServiceTable(void)
 {
@@ -1372,6 +2190,7 @@ void KiInitializeServiceTable(void)
     KiServiceTable[SN_NtReleaseSemaphore]       = NtReleaseSemaphore;
     KiServiceTable[SN_NtQueryInformationProcess] = NtQueryInformationProcess;
     KiServiceTable[SN_NtTraceCall] = NtTraceCall;
+    KiServiceTable[SN_NtCallbackReturn] = NtCallbackReturn;
     KiServiceTable[SN_NtUserGetThreadState] = NtUserGetThreadState;
     KiServiceTable[SN_NtUserPeekMessage] = NtUserPeekMessage;
     KiServiceTable[SN_NtUserCallOneParam] = NtUserCallOneParam;
@@ -1391,7 +2210,7 @@ void KiInitializeServiceTable(void)
     KiServiceTable[SN_NtUserEnableMouseInPointer] = NtUserEnableMouseInPointer;
     KiServiceTable[SN_NtUserSetProcessUIAccessZorder] =
         NtUserSetProcessUIAccessZorder;
-    KiServiceTable[SN_NtUserCallNoParam] = NtUserCallOneParam;
+    KiServiceTable[SN_NtUserCallNoParam] = NtUserCallNoParam;
     KiServiceTable[SN_NtUserMessageCall] = NtUserMessageCall;
     KiServiceTable[SN_NtUserPostMessage] = NtUserPostMessage;
     KiServiceTable[SN_NtUserQueryWindow] = NtUserQueryWindow;
@@ -1435,6 +2254,8 @@ void KiInitializeServiceTable(void)
     KiServiceTable[SN_NtUserCallHwnd] = NtUserCallHwnd;
     KiServiceTable[SN_NtUserCallHwndLock] = NtUserCallHwndLock;
     KiServiceTable[SN_NtUserCallHwndParam] = NtUserCallHwndParam;
+    KiServiceTable[SN_NtUserGetObjectInformation] = NtUserGetObjectInformation;
+    KiServiceTable[SN_NtUserRegisterHotKey] = NtUserRegisterHotKey;
     KiServiceTable[SN_NtUserCallTwoParam] = NtUserCallTwoParam;
     KiServiceTable[SN_NtUserSetWindowLong] = NtUserSetWindowLong;
     KiServiceTable[SN_NtUserSetWindowLongPtr] = NtUserSetWindowLong;
@@ -1449,7 +2270,10 @@ UINT64 KiSystemServiceDispatch(UINT64 number, UINT64 *reg_args, UINT64 user_rsp)
     if (number < NTOS_MAX_SYSCALL && number >= 0x1000 &&
         !seen_services[number]) {
         seen_services[number] = 1;
-        KeLog("[user] first win32u service 0x%lx\n", (unsigned long)number);
+        PKTHREAD caller = KeGetCurrentThread();
+        KeLog("[user] first win32u service 0x%lx (tid %lu)\n",
+              (unsigned long)number,
+              caller ? (unsigned long)caller->ThreadId : 0ul);
     }
     if (number >= NTOS_MAX_SYSCALL || KiServiceTable[number] == NULL) {
         /* Win32k-range services (win32u) that we do not implement yet return

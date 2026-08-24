@@ -52,6 +52,7 @@ void KeInitializeScheduler(void)
     InsertTailList(&g_system_process.ThreadListHead, &g_idle_thread.ProcessEntry);
 
     g_current_thread = &g_idle_thread;
+    KeSetCurrentThread(&g_idle_thread);
     g_next_thread_id = 1;
 
     /* Give the idle thread a valid FPU/SSE image for the first context switch. */
@@ -184,6 +185,7 @@ static void KiSchedule(void)
     next->State = ThreadStateRunning;
     next->Quantum = DEFAULT_QUANTUM;
     g_current_thread = next;
+    KeSetCurrentThread(next);
 
     /* Point the CPU's ring-0 entry stack at the incoming thread's kernel stack,
      * so a syscall or interrupt taken from ring 3 lands on the right stack, and

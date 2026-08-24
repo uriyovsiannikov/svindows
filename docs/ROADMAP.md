@@ -242,11 +242,50 @@ bottom of the graphics stack and builds up.
       `std::exception` under its MSVC-mangled names); and
       `NtUserChangeWindowMessageFilterEx` grants the taskbar's message
       filter assertion after WorkerW creation.
-- [ ] The remaining explorer blocker: right after the WorkerW window is
-      created, the SHCORE desktop thread faults on a NULL pointer inside
-      shell32 (a client-side USER query that returns NULL in this system —
-      GetWindowLongPtr/GetClassName-family — needs the getter half of the
-      window-long/property surface plus whatever shell32 reads through it).
+- [x] **The desktop-thread bootstrap runs to completion with no faults.**
+      After the WorkerW is created the SHCORE desktop thread asserts its
+      message filter (`NtUserChangeWindowMessageFilterEx`), checks the
+      App Paths key, reads the window-station/desktop identity
+      (`NtUserGetObjectInformation` answering `WinSta0`/`Default`),
+      posts its hand-off messages to the main thread, and exits cleanly —
+      no trap. The NULL crash that used to kill it here was
+      `PathFindExtensionW`: kernel32 now hosts the shlwapi path helpers
+      (`PathFindFileName/Extension` A+W) instead of stubbing them to 0
+      (mapping the whole shlwapi contract family to the genuine
+      shlwapi.dll was tried first and destabilized other paths, so the
+      two needed functions are implemented directly). msvcrt also gained
+      `wcsncmp/strncmp/_wcsnicmp/_strnicmp`.
+- [x] **The shell's main thread survives window creation and reaches its
+      message pump.** With the kernel→user callback machinery in place the
+      first `CreateWindowExW` ('Worker Window') still ended in a ring-3
+      page fault whose return address was stack garbage. GDB over the QEMU
+      gdbstub traced it: the genuine user32 validates every HWND purely in
+      user mode against the shared `HANDLEENTRY` table (type byte must be
+      1/TYPE_WINDOW), and that table — mapped user-writable — was being
+      corrupted between creation and validation, so CreateWindowExW took
+      its ERROR_INVALID_WINDOW_HANDLE path and smashed its own frame.
+      Fix: the client-visible handle table is now kernel-owned read-only
+      for ring 3 (as win32k's is), with write access enabled transiently
+      around kernel-side fills (`MmProtectRange`); any client that writes
+      it now traps with a nameable RIP instead of corrupting state. The
+      full bootstrap now runs clean: Worker Window → Shell_TrayWnd taskbar
+      → WorkerW desktop host, each receiving WM_NCCREATE/WM_CREATE through
+      the callback dispatcher, ~60 Win-key hotkeys registered on the
+      taskbar, per-thread USER input events backing
+      MsgWaitForMultipleObjects, and tid 1 parked in GetMessage waiting
+      for work — the outcome in the majority of boots.
+      Residual, ~30% of boots: a timing-dependent ring-3 fault lands right
+      after the first `CreateWindowEx` callback chain completes (fingerprint:
+      RIP=RBP inside the thread stack, CR2 = the new HWND, RCX/RDX still
+      holding the redirect's OrigRip/OrigRsp). The kernel-side return path is
+      verified correct under GDB — the final redirect lands with the exact
+      expected user frame — so the divergence is inside genuine user32's own
+      post-create code (a function-pointer call near USER32+0xd455 whose
+      target comes out as stack garbage in bad runs), most likely sensitive
+      to loader relocation/delay-import handling or client state we do not
+      model yet. Even in crashing runs the shell's other threads finish the
+      taskbar bring-up (Shell_TrayWnd + WorkerW created with full callback
+      chains, ~71 hotkeys registered); the crash kills only tid 1.
 - [ ] A window/compositor model (drawing windows, z-order, dirty rectangles).
 - [ ] `win32k`-style kernel graphics + a `gdi32`/`user32` surface so Win32 GUI
       programs can create windows and paint — the bridge from console programs

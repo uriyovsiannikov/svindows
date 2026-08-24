@@ -72,4 +72,10 @@ UINT64 NtReleaseSemaphore(UINT64 *args);
 UINT64 NtQueryInformationProcess(UINT64 *args);
 UINT64 NtCreateThreadEx(UINT64 *args);
 
+/* Create a notification (manual-reset) Event object and a handle to it in the
+ * current process, for kernel-owned events ring 3 must be able to wait on --
+ * the per-thread USER input event backing MsgWaitForMultipleObjects. The
+ * caller keeps `event_out` to signal it without going through the handle. */
+NTSTATUS PsCreateNotificationEvent(PKEVENT *event_out, HANDLE *handle_out);
+
 #endif /* _NTOS_PS_H_ */

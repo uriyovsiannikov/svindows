@@ -67,6 +67,29 @@ NTSTATUS ObCreateHandle(POBJECT object, ACCESS_MASK access, HANDLE *out_handle)
             return STATUS_SUCCESS;
         }
     }
+    /* Exhaustion is a silent killer: every later Nt*Create/Open returns a NULL
+     * handle and the caller behaves as if the object never existed. Report it
+     * once, with a per-type census so the leaking object type is obvious. */
+    static BOOLEAN reported;
+    if (!reported) {
+        reported = TRUE;
+        KeLog("[ob]   handle table exhausted (%u slots); census:\n",
+              (unsigned)OB_MAX_HANDLES);
+        for (UINT32 i = 0; i < OB_MAX_HANDLES; i++) {
+            POBJECT_TYPE type = ObHeaderFromObject(g_handles[i].Object)->Type;
+            BOOLEAN counted = FALSE;
+            for (UINT32 j = 0; j < i; j++)
+                if (ObHeaderFromObject(g_handles[j].Object)->Type == type)
+                    counted = TRUE;
+            if (counted)
+                continue;
+            UINT32 n = 0;
+            for (UINT32 j = 0; j < OB_MAX_HANDLES; j++)
+                if (ObHeaderFromObject(g_handles[j].Object)->Type == type)
+                    n++;
+            KeLog("[ob]     %s: %u handle(s)\n", type->Name, (unsigned)n);
+        }
+    }
     return STATUS_INSUFFICIENT_RESOURCES;
 }
 

@@ -67,6 +67,32 @@ UINT64 NtCreateEvent(UINT64 *a)
     return (UINT64)STATUS_SUCCESS;
 }
 
+/*
+ * Kernel-owned notification event with a ring-3 handle. USER needs one per GUI
+ * thread: MsgWaitForMultipleObjects waits on the thread's "input event", which
+ * win32k signals when a message lands in that thread's queue. The kernel keeps
+ * the object pointer so it can signal without a handle lookup.
+ */
+NTSTATUS PsCreateNotificationEvent(PKEVENT *event_out, HANDLE *handle_out)
+{
+    POBJECT obj;
+    if (!NT_SUCCESS(ObCreateObject(g_event_type, sizeof(KEVENT), &obj)))
+        return STATUS_NO_MEMORY;
+    KeInitializeEvent((PKEVENT)obj, TRUE /* notification */, FALSE);
+
+    HANDLE h;
+    if (!NT_SUCCESS(ObCreateHandle(obj, GENERIC_ALL, &h))) {
+        ObDereferenceObject(obj);
+        return STATUS_NO_MEMORY;
+    }
+    /* The handle holds the only reference; it is never closed (the event lives
+     * as long as the thread's queue does). */
+    ObDereferenceObject(obj);
+    *event_out = (PKEVENT)obj;
+    *handle_out = h;
+    return STATUS_SUCCESS;
+}
+
 /* NtSetEvent(HANDLE, PLONG PreviousState). */
 UINT64 NtSetEvent(UINT64 *a)
 {
@@ -269,10 +295,38 @@ UINT64 NtWaitForMultipleObjects(UINT64 *a)
             break;
     }
 
-    if (NT_SUCCESS(status))
+    if (NT_SUCCESS(status)) {
+        /* Same diagnostic as the single-object wait: a blocking multi-object
+         * wait is where a stuck GUI thread ends up (MsgWaitForMultipleObjects
+         * waits on the caller's handles plus the USER input event), so report
+         * the handle set once per (thread, count, first handle). */
+        UINT64 tid = 0;
+        PKTHREAD thread = KeGetCurrentThread();
+        if (thread)
+            tid = thread->ThreadId;
+        static UINT64 logged[64];
+        static ULONG logged_count;
+        UINT64 key = tid << 40 | (UINT64)count << 32 |
+                     (UINT32)(ULONG_PTR)handles[0];
+        BOOLEAN seen = FALSE;
+        for (ULONG i = 0; i < logged_count; i++)
+            if (logged[i] == key)
+                seen = TRUE;
+        if (!seen && logged_count < 64) {
+            logged[logged_count++] = key;
+            KeLog("[ps]   thread %llu waits on %lu object(s) (%s, %s): "
+                  "%p %p %p %p\n", (unsigned long long)tid,
+                  (unsigned long)count, wait_type == 0 ? "all" : "any",
+                  timeout ? "timed" : "indefinite",
+                  (void *)(ULONG_PTR)handles[0],
+                  (void *)(count > 1 ? (ULONG_PTR)handles[1] : 0),
+                  (void *)(count > 2 ? (ULONG_PTR)handles[2] : 0),
+                  (void *)(count > 3 ? (ULONG_PTR)handles[3] : 0));
+        }
         status = KeWaitForMultipleObjects(count, headers,
                                           (BOOLEAN)(wait_type == 0),
                                           timeout_to_ticks(timeout));
+    }
     while (referenced)
         ObDereferenceObject(objects[--referenced]);
     return (UINT64)status;

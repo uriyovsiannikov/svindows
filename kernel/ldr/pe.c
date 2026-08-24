@@ -369,6 +369,30 @@ static BOOLEAN LdrpEnsureStubArena(void)
     return TRUE;
 }
 
+/* Accessors for the kernel's user-callback trampolines (ke/syscall.c). */
+BOOLEAN LdrpEnsureStubArenaPub(void)
+{
+    return LdrpEnsureStubArena();
+}
+
+UINT64 LdrStubArenaBase(void)
+{
+    return g_stub_arena;
+}
+
+UINT64 LdrStubArenaEnd(void)
+{
+    return g_stub_end;
+}
+
+UINT64 LdrStubArenaNext(UINT64 advance)
+{
+    UINT64 cur = g_stub_next;
+    if (advance)
+        g_stub_next += advance;
+    return cur;
+}
+
 static UINT64 LdrpImportStub(void)
 {
     if (!LdrpEnsureStubArena())
@@ -745,16 +769,6 @@ static UINT64 LdrpLoadModule(const char *name)
     if (strncmp(name, "api-ms-win-storage-exports-",
                 sizeof("api-ms-win-storage-exports-") - 1) == 0)
         return LdrpLoadModule("windows.storage.dll");
-
-    /* The classic path/string/registry helper surface ships under shlwapi
-     * contract names; the genuine shlwapi.dll is supplied with the shell and
-     * hosts them (PathFindExtensionW and friends -- shell32 derefs their
-     * results without NULL checks). */
-    if (strncmp(name, "api-ms-win-core-shlwapi-",
-                sizeof("api-ms-win-core-shlwapi-") - 1) == 0 ||
-        strncmp(name, "api-ms-win-shlwapi-",
-                sizeof("api-ms-win-shlwapi-") - 1) == 0)
-        return LdrpLoadModule("shlwapi.dll");
 
     /* Universal CRT contracts are API-set names whose inbox host is
      * ucrtbase.dll. Windows.Storage and the shell use the private/runtime and

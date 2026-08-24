@@ -1548,6 +1548,62 @@ __declspec(dllexport) WORD FindAtomW(const WCHAR *name)
     return KiFindAtomW(name);
 }
 
+/* Minimal shlwapi path helpers (hosted for the api-ms-win-core-shlwapi
+ * contracts): shell32 derefs these results without NULL checks, so a stub
+ * returning 0 was fatal. They only need the separator semantics, not the
+ * full canonicalization rules. */
+static const WCHAR *KiPathSkipRootLike(const WCHAR *path)
+{
+    /* Past the last separator, or the start when there is none. */
+    const WCHAR *last = path;
+    for (const WCHAR *p = path; *p; p++)
+        if (*p == '\\' || *p == '/' || *p == ':')
+            last = p + 1;
+    return last;
+}
+
+__declspec(dllexport) const WCHAR *PathFindFileNameW(const WCHAR *path)
+{
+    if (!path)
+        return 0;
+    return KiPathSkipRootLike(path);
+}
+
+__declspec(dllexport) const WCHAR *PathFindExtensionW(const WCHAR *path)
+{
+    if (!path)
+        return 0;
+    const WCHAR *name = KiPathSkipRootLike(path);
+    const WCHAR *dot = 0;
+    for (const WCHAR *p = name; *p; p++)
+        if (*p == '.')
+            dot = p;
+    return dot ? dot : name; /* points at the NUL when there is no dot */
+}
+
+__declspec(dllexport) const char *PathFindFileNameA(const char *path)
+{
+    if (!path)
+        return 0;
+    const char *last = path;
+    for (const char *p = path; *p; p++)
+        if (*p == '\\' || *p == '/' || *p == ':')
+            last = p + 1;
+    return last;
+}
+
+__declspec(dllexport) const char *PathFindExtensionA(const char *path)
+{
+    if (!path)
+        return 0;
+    const char *name = PathFindFileNameA(path);
+    const char *dot = 0;
+    for (const char *p = name; *p; p++)
+        if (*p == '.')
+            dot = p;
+    return dot ? dot : name;
+}
+
 __declspec(dllexport) WORD GlobalAddAtomW(const WCHAR *name)
 {
     if (!name)

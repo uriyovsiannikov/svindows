@@ -126,17 +126,9 @@ RtlResetNtUserPfn:
     xor     eax, eax
     ret
 
-; USER32 forwards DefWindowProcA/W here (NTDLL.NtdllDefWindowProc_W). The real
-; routine answers the few messages whose defaults live in ntdll (the CTLCOLOR
-; family returns system brushes); every other message takes the standard
-; "not handled" result of zero, which is what an empty USER system should
-; report until win32k exists.
-global NtdllDefWindowProc_W
-NtdllDefWindowProc_W:
-global NtdllDefWindowProc_A
-NtdllDefWindowProc_A:
-    xor     eax, eax
-    ret
+; USER32 forwards DefWindowProcA/W here (NTDLL.NtdllDefWindowProc_W). The
+; implementation lives in the C half of this DLL (ntdllrtl.c), where the
+; per-message default results are readable.
 
 ; USER32 connects to the user CSR server during DLL_PROCESS_ATTACH and asks it
 ; to fill a 0x240-byte USERCONNECT block.  On Windows the first member of that

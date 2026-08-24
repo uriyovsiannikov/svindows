@@ -223,7 +223,40 @@ typedef struct _KTHREAD {
 
     /* x87+SSE state saved across context switches (FXSAVE image; 16-aligned). */
     __attribute__((aligned(16))) UINT8 FpuState[512];
+
+    /* User-mode callback machinery (the win32k KiUserCallbackDispatcher
+     * equivalent). UserRip/UserRsp/UserRflags mirror the trap frame of the
+     * syscall currently being serviced; a service may arm a one-shot redirect
+     * (RedirectPending) that sends the sysret into a generated user
+     * trampoline (Callback*) which calls a WndProc and re-enters via
+     * NtCallbackReturn. The first callback of a chain saves the original
+     * caller's frame in Orig*, and the final redirect restores it with the
+     * callback's result in RAX. CallbackContinue selects the kernel-side
+     * continuation. The entry stub hardcodes these offsets; _Static_asserts
+     * in ke/syscall.c fail the build if the layout drifts. */
+    UINT64 UserRip;
+    UINT64 UserRsp;
+    UINT64 UserRflags;
+    UINT64 CallbackRip;
+    UINT64 CallbackRsp;
+    UINT64 CallbackFlags;
+    UINT64 CallbackContinue;
+    UINT64 CallbackWindow;
+    UINT64 CallbackMsg;
+    UINT64 CallbackLParam;
+    UINT64 OrigRip;
+    UINT64 OrigRsp;
+    UINT64 OrigRflags;
+    UINT8  CallbackActive;
+    UINT8  RedirectPending;
+    UINT8  Padding0[6];
+    /* The qword the interrupted caller's stub would `ret` through. The
+     * callback chain must leave the interrupted frame exactly as it found
+     * it (the win32k guarantee); this copy lets the final redirect restore
+     * that slot even if ring-3 scratch code clobbered it in between. */
+    UINT64 SavedReturnAddress;
 } KTHREAD, *PKTHREAD;
+
 
 /*
  * KPROCESS - a container for threads and (later) an address space. For now all
@@ -304,6 +337,7 @@ void KiInitializeSystemCalls(void);
 /* Point the CPU's ring-0 entry stack (TSS.RSP0 and the syscall entry's kernel
  * stack) at `kernel_rsp`. The scheduler calls this on every context switch. */
 void KeSetKernelStack(UINT64 kernel_rsp);
+void KeSetCurrentThread(PKTHREAD thread);
 
 /* Set the GS base a thread will see in ring 3 (its TEB); 0 selects the kernel
  * per-CPU block. The scheduler calls this on every context switch so the
