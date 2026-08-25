@@ -196,9 +196,21 @@ higher_half_start:
 
 ; ---------------------------------------------------------------------------
 ; Kernel stack (higher-half BSS).
+;
+; The PE loader recurses once per dependency edge (LdrpLoadModule ->
+; LdrResolveImports -> LdrpLoadModule, plus forwarder chains), so the real
+; Explorer dependency graph - around a hundred modules deep in places - needs
+; far more than the 16 KiB this used to be. Overflowing here is silent and
+; vicious: the stack sits in .bss directly above the pool's own globals, so an
+; overflow rewrites the allocator's free list and the machine dies far from the
+; cause. kernel_stack_guard sits immediately below the stack so the overflow is
+; detected and named instead (see LdrpCheckStackGuard).
 ; ---------------------------------------------------------------------------
 section .bss nobits alloc write align=16
+global kernel_stack_guard
+kernel_stack_guard:
+    resq    2
 global kernel_stack
 kernel_stack:
-    resb    0x4000                          ; 16 KiB
+    resb    0x20000                         ; 128 KiB
 kernel_stack_top:

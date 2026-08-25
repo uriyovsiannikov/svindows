@@ -131,12 +131,11 @@ RtlResetNtUserPfn:
 ; per-message default results are readable.
 
 ; USER32 connects to the user CSR server during DLL_PROCESS_ATTACH and asks it
-; to fill a 0x240-byte USERCONNECT block.  On Windows the first member of that
-; block is a pointer to the read-only SERVERINFO shared by win32k and USER32.
-; We do not have CSRSS/win32k yet, but returning a real, stable zero-initialized
-; SERVERINFO is enough to establish the ABI correctly (and is deliberately not
-; a fake desktop implementation).  The kernel-side USER subsystem will grow
-; this shared page as individual fields become necessary.
+; to fill a 0x240-byte USERCONNECT block.  Its first payload member is
+; SHAREDINFO, whose psi field points at the read-only SERVERINFO that win32k
+; and USER32 share.  win32k builds that page (kernel/win32k/serverinfo.c) at a
+; fixed client-visible address and fills in the screen metrics and system
+; colours, so GetSystemMetrics/GetSysColor answer correctly without a syscall.
 ;
 ; NTSTATUS CsrClientConnectToServer(
 ;     PWSTR ObjectDirectory, ULONG ServerId, PVOID ConnectionInfo,
@@ -145,10 +144,10 @@ global CsrClientConnectToServer
 CsrClientConnectToServer:
     test    r8, r8
     jz      .csr_invalid_parameter
-    lea     rax, [rel ntuser_server_info]
     ; The first eight bytes are the CSR connection header. USER32 copies the
     ; build-specific 0x238-byte payload starting at ConnectionInfo+8; its first
     ; payload member is psi (the shared SERVERINFO pointer).
+    mov     rax, 0x0000000001320000
     mov     [r8 + 8], rax
     ; SHAREDINFO.aheList and HeEntrySize. PsCreateUserProcess maps the native
     ; 24-byte USER HANDLEENTRY array at this fixed client-visible address.
@@ -209,7 +208,3 @@ align 8
 ntuser_pfn1: dq 0
 ntuser_pfn2: dq 0
 ntuser_pfn3: dq 0
-align 16
-; Initial SERVERINFO prefix. USER32 currently reads byte 0 (feature flags);
-; reserve a full page so later compatible fields can be populated in place.
-ntuser_server_info: times 4096 db 0

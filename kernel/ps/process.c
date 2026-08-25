@@ -10,6 +10,7 @@
 #include <ntos/ke.h>
 #include <ntos/rtl.h>
 #include <ntos/ldr.h>
+#include <ntos/win32k.h>
 #include <nt/peb.h>
 
 /* Fixed user addresses for the single process we currently support (shared with
@@ -45,6 +46,15 @@ PKTHREAD PsCreateUserProcess(const char *name, const char *command_line,
         memset(page, 0, PAGE_SIZE);
     }
     peb->GdiSharedHandleTable = (PVOID)PROCESS_GDI_SHARED_TABLE_VA;
+
+    /* The attribute blocks a GDI cell's pUserInfo points at. GDI32 writes DC
+     * state into them (SetTextColor and SetBkColor never enter the kernel), so
+     * unlike the handle table itself this arena stays user-writable. */
+    for (UINT64 off = 0; off < PROCESS_GDI_ATTR_SIZE; off += PAGE_SIZE) {
+        void *page = map_user_rw(PROCESS_GDI_ATTR_VA + off);
+        memset(page, 0, PAGE_SIZE);
+    }
+    W32kInitializeGdi();
 
     /* USER32 validates HWND values through SHAREDINFO.aheList without entering
      * the kernel. Keep the native 24-byte HANDLEENTRY array and initial shared
@@ -106,6 +116,13 @@ PKTHREAD PsCreateUserProcess(const char *name, const char *command_line,
     *(void **)(params + 0x78) = cmdw;
     peb->ProcessParameters = params;
 
+    /* An ANSI copy of the same command line, past the wide one, for the CRT's
+     * `_acmdln` data export (see LdrSeedCrtCommandLine). */
+    char *cmda = (char *)(params + 0x800);
+    for (UINT16 i = 0; i <= cmd_n; i++)
+        cmda[i] = command_line[i];
+    LdrSeedCrtCommandLine((UINT64)cmda, (UINT64)cmdw);
+
     /* TEB: the per-thread block GS resolves to in ring 3. */
     for (UINT64 off = 0; off < PROCESS_TEB_SIZE; off += PAGE_SIZE)
         map_user_rw(USER_TEB_VA + off);
@@ -114,14 +131,29 @@ PKTHREAD PsCreateUserProcess(const char *name, const char *command_line,
     teb->NtTib.Self = (struct _NT_TIB *)USER_TEB_VA;
     {
         UINT64 *client = (UINT64 *)((UINT8 *)teb + 0x800);
-        client[0x20] = PROCESS_USER_OBJECT_ARENA_VA +
-                       PROCESS_USER_OBJECT_ARENA_SIZE; /* &range pair */
-        client[0x21] = 0; /* desktop-heap delta: heads stay absolute */
+        /* CLIENTINFO.pDeskInfo (+0x20) and .ulClientDelta (+0x28) -- the
+         * DESKTOPINFO USER32's client-side window fast paths use, starting with
+         * { pvDesktopBase, pvDesktopLimit }. Deliberately left NULL: the page
+         * above the window arena carries that range pair and publishing it does
+         * make USER32 take those paths, but they then reach for the rest of the
+         * structure (DESKTOPINFO.spwnd, the shell/Progman windows) and end up
+         * calling a NULL window procedure -- a ring-3 #PF at USER32+0x121e4
+         * with RIP=0 through the CFG dispatch. Publishing a DESKTOPINFO is the
+         * step that needs a real desktop window behind it. USER32 reads only
+         * +0x20/+0x28 here, never +0x100/+0x108, which an earlier version of
+         * this code wrote. */
+        client[4] = 0;
+        client[5] = 0;
+        /* CLIENTINFO.dwExpWinVer (+0x10). USER32 compares it against 0x400 on
+         * the way into GetSystemMetrics and other entry points and diverts
+         * every caller to its Windows-3.x compatibility path when it is lower;
+         * zero (a freshly cleared TEB) is lower. Report Windows 10. */
+        *(UINT32 *)((UINT8 *)teb + 0x810) = 0x0A00;
     }
     teb->NtTib.StackBase = (PVOID)stack_top;
     teb->NtTib.StackLimit = (PVOID)stack_base;
     teb->ProcessEnvironmentBlock = (PVOID)USER_PEB_VA;
-    teb->ClientId.UniqueProcess = (HANDLE)(ULONG_PTR)1;
+    teb->ClientId.UniqueProcess = (HANDLE)(ULONG_PTR)PROCESS_CLIENT_ID;
     teb->ClientId.UniqueThread = (HANDLE)(ULONG_PTR)1;
 
     KeLog("[ps]   process '%s': PEB @ %p (ImageBase %p), TEB @ %p\n",

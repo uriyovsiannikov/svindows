@@ -79,6 +79,11 @@ ifeq ($(PROGRAM),testapp.exe)
 BOOT_IMAGE := $(TESTAPP)
 else ifeq ($(PROGRAM),hello.exe)
 BOOT_IMAGE := $(HELLO)
+else ifneq ($(wildcard win/$(PROGRAM)),)
+# A stock Windows binary supplied in win/ alongside the inbox DLLs, so
+#   make PROGRAM=notepad.exe run-gui-image
+# boots it without a copy in the project root.
+BOOT_IMAGE := win/$(PROGRAM)
 else
 BOOT_IMAGE := $(PROGRAM)
 endif
@@ -87,11 +92,14 @@ endif
 # booted.  This lets utilities such as where.exe inspect another real Windows
 # executable without requiring a special copy rule for every new sample.
 EXTRA_PE_IMAGES := $(filter-out $(BOOT_IMAGE),$(sort $(wildcard *.exe) $(wildcard *.EXE)))
-WIN_FILES       := $(sort $(wildcard win/*))
+# Everything dropped into win/ goes on the disk image. Restricted to regular
+# files without spaces in the name: copying a Windows directory in also brings
+# "System Volume Information", and a name with a space becomes two dependencies.
+WIN_FILES       := $(sort $(shell find win -maxdepth 1 -type f ! -name '* *' 2>/dev/null))
 
 QEMU        := qemu-system-x86_64
 # -boot d forces booting from the CD-ROM (the ISO); the hard disk is data only.
-QEMUFLAGS   := -m 256M -no-reboot -no-shutdown -boot d
+QEMUFLAGS   := -m 1024M -no-reboot -no-shutdown -boot d
 QEMUDISK    := -drive file=$(DISK),format=raw,if=ide,index=0,media=disk
 
 .PHONY: all iso run run-gui run-gui-image clean FORCE
@@ -158,6 +166,7 @@ $(MSVCRT): user/msvcrt.c $(KERNEL32)
 	           "/export:??0exception@@QEAA@AEBV0@@Z=msvcrt_exception_ctor_copy" \
 	           /export:??1exception@@UEAA@XZ=msvcrt_exception_dtor \
 	           "/export:?what@exception@@UEBAPEBDXZ=msvcrt_exception_what" \
+	           "/export:?terminate@@YAXXZ=msvcrt_terminate" \
 	           $(BUILD)/msvcrt.obj $(KERNEL32LIB)
 	@echo "  DLL   $(MSVCRT)"
 
@@ -217,7 +226,7 @@ $(HELLO): user/hello.c $(CRT0) $(KERNEL32) $(MSVCRT)
 # ATA + FAT drivers at runtime.
 $(DISK): FORCE $(TESTAPP) $(HELLO) $(KERNEL32) $(NTDLL) $(ADVAPI32) $(MSVCRT) $(EXTRA) $(WS2_32) user/message.txt $(BOOT_IMAGE) $(EXTRA_PE_IMAGES) $(WIN_FILES)
 	@mkdir -p $(BUILD)
-	dd if=/dev/zero of=$(DISK) bs=1M count=96 status=none
+	dd if=/dev/zero of=$(DISK) bs=1M count=512 status=none
 	mformat -i $(DISK) -F -v NTOSDISK ::
 	mcopy -i $(DISK) $(TESTAPP) ::TESTAPP.EXE
 	mcopy -i $(DISK) $(HELLO) ::HELLO.EXE

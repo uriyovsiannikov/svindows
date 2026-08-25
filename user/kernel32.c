@@ -3831,13 +3831,18 @@ __declspec(dllexport) BOOL GetMessageW(void *message, HANDLE window,
 /* PE resource directory                                              */
 /* ------------------------------------------------------------------ */
 
+/* IMAGE_RESOURCE_DIRECTORY: 16 bytes, with the two entry counts at +12 and
+ * +14 and the entry array immediately after. Characteristics and TimeDateStamp
+ * are DWORDs -- declaring them as WORDs shrinks the header to 12 bytes, which
+ * reads the counts out of MajorVersion/MinorVersion and puts the entry array
+ * four bytes too early, so every lookup walks garbage. */
 typedef struct _RES_DIRECTORY {
-    WORD Characteristics;
-    WORD TimeDateStamp;
-    WORD MajorVersion;
-    WORD MinorVersion;
-    WORD NumberOfNamedEntries;
-    WORD NumberOfIdEntries;
+    DWORD Characteristics;
+    DWORD TimeDateStamp;
+    WORD  MajorVersion;
+    WORD  MinorVersion;
+    WORD  NumberOfNamedEntries;
+    WORD  NumberOfIdEntries;
 } RES_DIRECTORY;
 
 typedef struct _RES_ENTRY {
@@ -3855,15 +3860,29 @@ typedef struct _RES_DATA_ENTRY {
 #define RES_NAME_IS_STRING 0x80000000u
 #define RES_SUBDIR         0x80000000u
 
-static BYTE *res_section(BYTE *base)
+/* The resource data directory's RVA. A localized binary's .mui companion is a
+ * machine-neutral PE32 image, and PE32 puts the data directory at optional
+ * header + 96 rather than + 112 -- reading it at the 64-bit offset yields
+ * garbage, which is exactly what made every resource lookup in a .mui miss. */
+static DWORD res_dir_rva(BYTE *base)
 {
     if (!base)
         base = (BYTE *)NtCurrentPeb()->ImageBaseAddress;
     DWORD pe = *(DWORD *)(base + 0x3C);
     BYTE *opt = base + pe + 24;
-    DWORD rva = *(DWORD *)(opt + 112 + 2 * 8);
+    WORD magic = *(WORD *)opt;
+    DWORD directories = (magic == 0x010B) ? 96 : 112;
+    return *(DWORD *)(opt + directories + 2 * 8);
+}
+
+static BYTE *res_section(BYTE *base)
+{
+    if (!base)
+        base = (BYTE *)NtCurrentPeb()->ImageBaseAddress;
+    DWORD rva = res_dir_rva(base);
     return rva ? base + rva : 0;
 }
+
 
 static const RES_ENTRY *res_find_entry(const RES_DIRECTORY *dir,
                                        const void *id)
@@ -3893,16 +3912,25 @@ static const RES_ENTRY *res_find_entry(const RES_DIRECTORY *dir,
     return 0;
 }
 
+/* A resource tree is normally three levels deep (type / name / language), but
+ * it is legal for a level to end in a data entry instead of another directory,
+ * and the .mui companions do exactly that: their string blocks sit directly
+ * under the name level with no language directory at all. Treating a leaf as a
+ * failure made every lookup in a .mui miss. */
 static void *res_walk(BYTE *res, const void *type, const void *name,
                       WORD lang)
 {
     const RES_ENTRY *e = res_find_entry((const RES_DIRECTORY *)res, type);
-    if (!e || !(e->OffsetToData & RES_SUBDIR))
+    if (!e)
         return 0;
+    if (!(e->OffsetToData & RES_SUBDIR))
+        return (void *)(res + e->OffsetToData);
     e = res_find_entry((const RES_DIRECTORY *)(res +
                        (e->OffsetToData & 0x7FFFFFFFu)), name);
-    if (!e || !(e->OffsetToData & RES_SUBDIR))
+    if (!e)
         return 0;
+    if (!(e->OffsetToData & RES_SUBDIR))
+        return (void *)(res + e->OffsetToData);
     const RES_DIRECTORY *lang_dir = (const RES_DIRECTORY *)(res +
                                     (e->OffsetToData & 0x7FFFFFFFu));
     const RES_ENTRY *le = (const RES_ENTRY *)(lang_dir + 1);
@@ -3914,17 +3942,97 @@ static void *res_walk(BYTE *res, const void *type, const void *name,
     return total ? (void *)(res + le[0].OffsetToData) : 0;
 }
 
+/*
+ * The localized half of a Windows binary's resources lives in a separate
+ * resource-only DLL next to it: notepad.exe carries icons, a manifest and a
+ * version block, while every UI string sits in notepad.exe.mui. On Windows the
+ * fallback is ntdll's alternate-resource-module machinery; here FindResourceEx
+ * does it directly, which is where every caller already funnels through.
+ *
+ * Without this, LoadStringW finds nothing, and a program that checks it loaded
+ * all its strings (notepad demands 49 of them) fails in a way that looks like a
+ * clean exit with no error at all.
+ */
+static BYTE *res_mui_base(BYTE *module)
+{
+    static BYTE *cached_module;
+    static BYTE *cached_mui;
+    static BOOL  tried;
+
+    if (!module)
+        module = (BYTE *)NtCurrentPeb()->ImageBaseAddress;
+    if (tried && module == cached_module)
+        return cached_mui;
+
+    char path[260];
+    DWORD n = GetModuleFileNameA((HANDLE)module, path, sizeof(path));
+    if (!n || n >= sizeof(path) - 5)
+        return 0;
+
+    /* The filesystem is flat, so only the leaf name matters. */
+    DWORD leaf = 0;
+    for (DWORD i = 0; i < n; i++)
+        if (path[i] == '\\' || path[i] == '/')
+            leaf = i + 1;
+    char name[260];
+    DWORD j = 0;
+    for (DWORD i = leaf; i < n && j < sizeof(name) - 5; i++)
+        name[j++] = path[i];
+    name[j++] = '.'; name[j++] = 'm'; name[j++] = 'u'; name[j++] = 'i';
+    name[j] = 0;
+
+    /* Mapped, not initialized: a resource-only module must never have its entry
+     * point called. NtLoadLibrary maps and links the image and stops there,
+     * which is what LOAD_LIBRARY_AS_DATAFILE means on Windows. */
+    cached_module = module;
+    cached_mui = (BYTE *)NtLoadLibrary(name);
+    tried = 1;
+    return cached_mui;
+}
+
+/* Bring-up trace for the resource fallback: which module was asked, whether it
+ * had a resource directory of its own, and what its .mui resolved to. */
+static void res_trace_find(const void *module, const void *own,
+                           const void *mui, const void *found)
+{
+    extern long NtDisplayString(const char *text);
+    static int traced;
+    if (traced >= 4)
+        return;
+    traced++;
+    static const char hex[] = "0123456789abcdef";
+    char m[128];
+    int n = 0;
+    const char *labels[4] = { "[k32] FindRes mod=0x", " own=0x", " mui=0x",
+                              " found=0x" };
+    const void *values[4] = { module, own, mui, found };
+    for (int v = 0; v < 4; v++) {
+        const char *p = labels[v];
+        while (*p) m[n++] = *p++;
+        for (int i = 0; i < 12; i++)
+            m[n++] = hex[((ULONGLONG)values[v] >> (44 - 4 * i)) & 0xF];
+    }
+    m[n++] = '\n';
+    m[n] = 0;
+    NtDisplayString(m);
+}
+
 __declspec(dllexport) HANDLE FindResourceExW(HANDLE module, const WCHAR *type,
                                              const WCHAR *name, WORD lang)
 {
     BYTE *res = res_section((BYTE *)module);
-    if (!res) {
-        SetLastError(1815); /* ERROR_RESOURCE_TYPE_NOT_FOUND */
-        return 0;
+    void *found = res ? res_walk(res, type, name, lang) : 0;
+    BYTE *mui_base = 0;
+    if (!found) {
+        mui_base = res_mui_base((BYTE *)module);
+        BYTE *mui = mui_base ? res_section(mui_base) : 0;
+        if (mui)
+            found = res_walk(mui, type, name, lang);
     }
-    void *found = res_walk(res, type, name, lang);
+    res_trace_find(module, res, mui_base, found);
     if (!found)
-        SetLastError(1814); /* ERROR_RESOURCE_NAME_NOT_FOUND */
+        SetLastError(res ? 1814 /* RESOURCE_NAME_NOT_FOUND */
+                         : 1815 /* RESOURCE_TYPE_NOT_FOUND */);
     return (HANDLE)found;
 }
 
@@ -3934,10 +4042,25 @@ __declspec(dllexport) HANDLE FindResourceW(HANDLE module, const WCHAR *name,
     return FindResourceExW(module, type, name, 0);
 }
 
+/* LoadResource turns the directory entry FindResource returned into the
+ * resource bytes. The RVA inside that entry is relative to the image the entry
+ * was found in, so decide between the module and its .mui by where the entry
+ * itself lives. */
 __declspec(dllexport) HANDLE LoadResource(HANDLE module, HANDLE res)
 {
-    (void)module;
-    return res;
+    if (!res)
+        return 0;
+    RES_DATA_ENTRY *entry = (RES_DATA_ENTRY *)res;
+    BYTE *base = (BYTE *)(module ? module
+                                 : (HANDLE)NtCurrentPeb()->ImageBaseAddress);
+    BYTE *mui_base = res_mui_base(base);
+    if (mui_base) {
+        DWORD rva = res_dir_rva(mui_base);
+        BYTE *dir = rva ? mui_base + rva : 0;
+        if (dir && (BYTE *)entry >= dir && (BYTE *)entry < dir + 0x400000)
+            return (HANDLE)(mui_base + entry->DataRva);
+    }
+    return (HANDLE)(base + entry->DataRva);
 }
 
 __declspec(dllexport) void *LockResource(HANDLE res)
@@ -3986,36 +4109,15 @@ __declspec(dllexport) BOOL EnumResourceLanguagesW(HANDLE module,
     return total != 0;
 }
 
+/* String resources live in RT_STRING blocks and, for a localized binary, in a
+ * separate .mui image; res_load_string handles both. */
+static int res_load_string(HANDLE module, UINT id, WCHAR *buf, int cch,
+                           WORD lang);
+
 __declspec(dllexport) int LoadStringW(HANDLE instance, UINT id, WCHAR *buf,
                                       int max_chars)
 {
-    BYTE *res = res_section((BYTE *)instance);
-    if (!res)
-        return 0;
-    RES_DATA_ENTRY *block = (RES_DATA_ENTRY *)res_walk(res,
-        (const void *)(ULONGLONG)(((UINT)id >> 4) + 1),
-        (const void *)(ULONGLONG)((UINT)id & 15), 0);
-    if (!block)
-        return 0;
-    BYTE *image = instance ? (BYTE *)instance
-                           : (BYTE *)NtCurrentPeb()->ImageBaseAddress;
-    const WCHAR *p = (const WCHAR *)(image + block->DataRva);
-    WORD count = *p++;
-    UINT index = (UINT)id & 15;
-    if (index >= count)
-        return 0;
-    for (UINT i = 0; i < index; i++)
-        p += 1 + p[0];
-    WORD len = *p++;
-    if (!max_chars)
-        return len;
-    if (!buf)
-        return 0;
-    int n = len < max_chars - 1 ? len : max_chars - 1;
-    for (int i = 0; i < n; i++)
-        buf[i] = p[i];
-    buf[n] = 0;
-    return n;
+    return res_load_string(instance, id, buf, max_chars, 0);
 }
 
 __declspec(dllexport) DWORD CheckForReadOnlyResource(HANDLE module, DWORD flag)
@@ -4824,4 +4926,174 @@ __declspec(dllexport) BOOL SetStdHandle(DWORD which, HANDLE handle)
     }
     *(HANDLE *)(pp + offset) = handle;
     return 1;
+}
+
+/* ------------------------------------------------------------------ */
+/* Character-walk helpers (api-ms-win-core-string / -stringansi)       */
+/*                                                                     */
+/* USER32 exports CharNextW and friends, but its own implementation is  */
+/* a jump through its IAT into these contracts, which on Windows land   */
+/* in KERNELBASE. Stubbing them to 0 is what made notepad's command     */
+/* line parser dereference NULL: it advances through the command line   */
+/* with CharNextW. No DBCS code page is active and surrogate pairs are  */
+/* not split by these APIs, so a single code unit is one step.          */
+/* ------------------------------------------------------------------ */
+
+__declspec(dllexport) WCHAR *CharNextW(const WCHAR *text)
+{
+    if (!text)
+        return 0;
+    if (!*text)
+        return (WCHAR *)text; /* stays on the terminator, as documented */
+    return (WCHAR *)(text + 1);
+}
+
+__declspec(dllexport) WCHAR *CharPrevW(const WCHAR *start, const WCHAR *text)
+{
+    if (!start || !text || text <= start)
+        return (WCHAR *)start;
+    return (WCHAR *)(text - 1);
+}
+
+__declspec(dllexport) char *CharNextA(const char *text)
+{
+    if (!text)
+        return 0;
+    if (!*text)
+        return (char *)text;
+    return (char *)(text + 1);
+}
+
+__declspec(dllexport) char *CharPrevA(const char *start, const char *text)
+{
+    if (!start || !text || text <= start)
+        return (char *)start;
+    return (char *)(text - 1);
+}
+
+__declspec(dllexport) char *CharNextExA(WORD code_page, const char *text,
+                                        DWORD flags)
+{
+    (void)code_page;
+    (void)flags;
+    return CharNextA(text);
+}
+
+__declspec(dllexport) char *CharPrevExA(WORD code_page, const char *start,
+                                        const char *text, DWORD flags)
+{
+    (void)code_page;
+    (void)flags;
+    return CharPrevA(start, text);
+}
+
+/* ------------------------------------------------------------------ */
+/* String resources                                                    */
+/*                                                                     */
+/* USER32's LoadStringW is a jump into KERNELBASE!LoadStringBaseExW,    */
+/* which this facade hosts. Stubbing it to 0 is not a harmless partial  */
+/* implementation: notepad loads 49 UI strings at startup and refuses   */
+/* to run if any is missing, which presents as a clean exit code 0.     */
+/* ------------------------------------------------------------------ */
+
+#define RT_STRING_ID 6
+
+/*
+ * RT_STRING resources are stored sixteen strings to a block: the block's
+ * resource id is id/16 + 1, and inside it each string is a 16-bit length
+ * followed by that many UTF-16 code units, with empty entries for unused ids.
+ */
+/* Bring-up trace: the first few string loads, with the values that decide
+ * whether a program that demands its whole string table starts at all. */
+static void res_trace(UINT id, const void *info, const void *data, int len)
+{
+    extern long NtDisplayString(const char *text);
+    static int traced;
+    if (traced >= 16)
+        return;
+    traced++;
+    static const char hex[] = "0123456789abcdef";
+    char m[96];
+    int n = 0;
+    const char *p = "[k32] LoadString id=";
+    while (*p) m[n++] = *p++;
+    for (int i = 0; i < 4; i++) m[n++] = hex[(id >> (12 - 4 * i)) & 0xF];
+    p = " info=0x";
+    while (*p) m[n++] = *p++;
+    for (int i = 0; i < 12; i++)
+        m[n++] = hex[((ULONGLONG)info >> (44 - 4 * i)) & 0xF];
+    p = " data=0x";
+    while (*p) m[n++] = *p++;
+    for (int i = 0; i < 12; i++)
+        m[n++] = hex[((ULONGLONG)data >> (44 - 4 * i)) & 0xF];
+    p = " len=";
+    while (*p) m[n++] = *p++;
+    for (int i = 0; i < 4; i++) m[n++] = hex[((UINT)len >> (12 - 4 * i)) & 0xF];
+    m[n++] = '\n';
+    m[n] = 0;
+    NtDisplayString(m);
+}
+
+static int res_load_string(HANDLE module, UINT id, WCHAR *buf, int cch,
+                           WORD lang)
+{
+    HANDLE info = FindResourceExW(module, (const WCHAR *)(ULONGLONG)RT_STRING_ID,
+                                  (const WCHAR *)(ULONGLONG)(id / 16 + 1),
+                                  lang);
+    if (!info) {
+        res_trace(id, 0, 0, -1);
+        return 0;
+    }
+    const WCHAR *p = (const WCHAR *)LoadResource(module, info);
+    if (!p) {
+        res_trace(id, info, 0, -2);
+        return 0;
+    }
+    for (UINT i = 0; i < (id % 16); i++)
+        p += 1 + *p;
+    int len = (int)*p++;
+    res_trace(id, info, p, len);
+
+    /* cch == 0 is the documented "give me a pointer into the resource" form. */
+    if (cch == 0) {
+        if (buf)
+            *(const WCHAR **)buf = p;
+        return len;
+    }
+    if (!buf)
+        return 0;
+    if (len > cch - 1)
+        len = cch - 1;
+    for (int i = 0; i < len; i++)
+        buf[i] = p[i];
+    buf[len] = 0;
+    return len;
+}
+
+__declspec(dllexport) int LoadStringBaseExW(HANDLE module, UINT id, WCHAR *buf,
+                                            int cch, WORD lang)
+{
+    return res_load_string(module, id, buf, cch, lang);
+}
+
+__declspec(dllexport) int LoadStringBaseW(HANDLE module, UINT id, WCHAR *buf,
+                                          int cch)
+{
+    return res_load_string(module, id, buf, cch, 0);
+}
+
+
+__declspec(dllexport) int LoadStringA(HANDLE module, UINT id, char *buf,
+                                     int cch)
+{
+    WCHAR wide[512];
+    int len = res_load_string(module, id, wide,
+                              cch > 512 ? 512 : cch, 0);
+    if (!buf || cch <= 0)
+        return len;
+    int i = 0;
+    for (; i < len && i < cch - 1; i++)
+        buf[i] = (char)(wide[i] < 0x100 ? wide[i] : '?');
+    buf[i] = 0;
+    return i;
 }

@@ -137,6 +137,63 @@ static UINT64 choose_image_base(UINT64 preferred, UINT64 image_size,
     return base;
 }
 
+/*
+ * Map a resource-only image (no entry point, no imports, no relocations) at a
+ * free address. Nothing in it depends on the load address: resource lookups are
+ * all relative to the resource directory, so any base will do.
+ */
+static NTSTATUS LdrpMapResourceImage(const void *file, SIZE_T file_size,
+                                     UINT64 *base_out)
+{
+    const UINT8 *bytes = (const UINT8 *)file;
+    const IMAGE_DOS_HEADER *dos = (const IMAGE_DOS_HEADER *)bytes;
+    const UINT8 *nt = bytes + dos->e_lfanew;
+    UINT16 sections = *(const UINT16 *)(nt + 6);
+    UINT16 opt_size = *(const UINT16 *)(nt + 20);
+    const UINT8 *opt = nt + 24;
+    UINT32 size_of_image = *(const UINT32 *)(opt + 56);
+    UINT32 size_of_headers = *(const UINT32 *)(opt + 60);
+
+    UINT64 image_size = PAGE_ALIGN_UP(size_of_image);
+    if (!image_size || image_size > 0x4000000ULL)
+        return STATUS_INVALID_IMAGE_FORMAT;
+
+    UINT64 base = (g_dynamic_image_next + 0xffffULL) & ~0xffffULL;
+    while (!image_range_free(base, image_size))
+        base += (image_size + 0xffffULL) & ~0xffffULL;
+    g_dynamic_image_next = base + ((image_size + 0xffffULL) & ~0xffffULL);
+
+    for (UINT64 off = 0; off < image_size; off += PAGE_SIZE) {
+        UINT64 pa = MmAllocatePage();
+        if (pa == MM_INVALID_PHYS)
+            return STATUS_NO_MEMORY;
+        if (!MmMapPage(base + off, pa, PTE_USER | PTE_WRITE))
+            return STATUS_CONFLICTING_ADDRESSES;
+    }
+    memset((void *)base, 0, image_size);
+    if (size_of_headers <= file_size)
+        memcpy((void *)base, bytes, size_of_headers);
+
+    const IMAGE_SECTION_HEADER *sec =
+        (const IMAGE_SECTION_HEADER *)(opt + opt_size);
+    for (UINT16 i = 0; i < sections; i++) {
+        const IMAGE_SECTION_HEADER *sh = &sec[i];
+        if (!sh->SizeOfRawData)
+            continue;
+        if ((UINT64)sh->PointerToRawData + sh->SizeOfRawData > file_size)
+            continue;
+        if ((UINT64)sh->VirtualAddress + sh->SizeOfRawData > image_size)
+            continue;
+        memcpy((void *)(base + sh->VirtualAddress),
+               bytes + sh->PointerToRawData, sh->SizeOfRawData);
+    }
+
+    KeLog("[ldr]  resource-only image mapped at %p (size 0x%lx)\n",
+          (void *)base, (unsigned long)image_size);
+    *base_out = base;
+    return STATUS_SUCCESS;
+}
+
 /* Map an image at its preferred base and lay out headers + sections (writable). */
 static NTSTATUS LdrpMapImage(const void *file, SIZE_T file_size, UINT64 *base_out)
 {
@@ -151,8 +208,27 @@ static NTSTATUS LdrpMapImage(const void *file, SIZE_T file_size, UINT64 *base_ou
 
     const IMAGE_NT_HEADERS64 *nt =
         (const IMAGE_NT_HEADERS64 *)(bytes + dos->e_lfanew);
-    if (nt->Signature != IMAGE_NT_SIGNATURE ||
-        nt->FileHeader.Machine != IMAGE_FILE_MACHINE_AMD64 ||
+    if (nt->Signature != IMAGE_NT_SIGNATURE)
+        return STATUS_INVALID_IMAGE_FORMAT;
+
+    /*
+     * Resource-only images: a localized binary keeps its strings, dialogs and
+     * menus in a companion .mui, and those are built machine-neutral PE32 with
+     * no entry point and no imports -- notepad.exe.mui here is Machine 0x014C,
+     * Magic 0x10B, AddressOfEntryPoint 0. Windows maps them as
+     * LOAD_LIBRARY_AS_IMAGE_RESOURCE, where bitness is irrelevant because no
+     * code ever runs. Rejecting them on Machine/Magic (which is what the check
+     * below does for real code) is why LoadString found nothing.
+     */
+    {
+        const UINT8 *opt = (const UINT8 *)&nt->OptionalHeader;
+        UINT16 magic = *(const UINT16 *)opt;
+        UINT32 entry = *(const UINT32 *)(opt + 16);
+        if (magic == IMAGE_NT_OPTIONAL_HDR32_MAGIC && entry == 0)
+            return LdrpMapResourceImage(file, file_size, base_out);
+    }
+
+    if (nt->FileHeader.Machine != IMAGE_FILE_MACHINE_AMD64 ||
         nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC)
         return STATUS_INVALID_IMAGE_FORMAT;
 
@@ -753,7 +829,52 @@ static void remember_module(const char *name, UINT64 base)
 }
 
 /* Load a dependency module by name from disk (or return the cached base). */
+/*
+ * The loader recurses once per dependency edge, on the single kernel boot
+ * stack, and that stack sits directly above the executive's own globals in
+ * .bss -- so an overflow silently rewrites the pool's free list. A guard word
+ * below the stack turns that into a named bugcheck, and a depth cap stops the
+ * descent before a pathological graph gets there at all.
+ */
+extern UINT64 kernel_stack_guard[2];
+#define LDR_STACK_GUARD_MAGIC 0x4B535447445241ULL
+#define LDR_MAX_DEPENDENCY_DEPTH 96
+
+static UINT32 g_ldr_depth;
+static UINT64 LdrpLoadModuleWorker(const char *name);
+
+void LdrInitializeStackGuard(void)
+{
+    kernel_stack_guard[0] = LDR_STACK_GUARD_MAGIC;
+    kernel_stack_guard[1] = LDR_STACK_GUARD_MAGIC;
+}
+
+static void LdrpCheckStackGuard(const char *name)
+{
+    if (kernel_stack_guard[0] == LDR_STACK_GUARD_MAGIC &&
+        kernel_stack_guard[1] == LDR_STACK_GUARD_MAGIC)
+        return;
+    KeBugCheck(KE_PHASE0_INITIALIZATION_FAILED,
+               "kernel stack overflowed while loading a module");
+    (void)name;
+}
+
 static UINT64 LdrpLoadModule(const char *name)
+{
+    LdrpCheckStackGuard(name);
+    if (g_ldr_depth >= LDR_MAX_DEPENDENCY_DEPTH) {
+        KeLog("[ldr]  dependency chain deeper than %u while loading '%s'; "
+              "refusing to recurse further\n",
+              (unsigned)LDR_MAX_DEPENDENCY_DEPTH, name);
+        return 0;
+    }
+    g_ldr_depth++;
+    UINT64 result = LdrpLoadModuleWorker(name);
+    g_ldr_depth--;
+    return result;
+}
+
+static UINT64 LdrpLoadModuleWorker(const char *name)
 {
     /* Modern Windows binaries import API-set contract names rather than the
      * host DLL directly.  Route each implemented contract family to its real
@@ -782,6 +903,23 @@ static UINT64 LdrpLoadModule(const char *name)
      * host for those core contracts. */
     if (ci_strcmp(name, "kernelbase.dll") == 0)
         return LdrpLoadModule("kernel32.dll");
+
+    /* GDI32's private kernel-facing contract: the NtGdi* stubs themselves.
+     * They live in win32u.dll, which is supplied, and stubbing them to 0 is
+     * indistinguishable from "the call failed" -- GetDeviceCaps answering 0 for
+     * LOGPIXELSY is enough to make a well-behaved program give up at startup. */
+    if (LdrpNameContains(name, "gdi-internal-uap") ||
+        LdrpNameContains(name, "gdi-internal-desktop"))
+        return LdrpLoadModule("win32u.dll");
+
+    /* The rest of the GDI surface ships under a dozen contract names
+     * (gdi-dc, gdi-draw, gdi-font, gdi-clipping, gdi-path, rtcore-gdi-devcaps,
+     * rtcore-gdi-object, rtcore-gdi-rgn, ...). They all live in the genuine
+     * gdi32. Leaving them unresolved is not neutral: a stubbed GetDeviceCaps
+     * answers 0 for LOGPIXELSY, and a program that sizes a font from that gives
+     * up before it ever creates a window. */
+    if (LdrpNameContains(name, "gdi-"))
+        return LdrpLoadModule("gdi32.dll");
 
     /* Most of the core contracts implemented so far live in kernel32. */
     if (strncmp(name, "api-ms-win-core-", 16) == 0 ||
@@ -842,6 +980,16 @@ static UINT64 LdrpLoadModule(const char *name)
             UINT8 stub[] = { 0xB8, 0x01, 0x00, 0x00, 0x00, 0xC3 };
             memcpy((void *)proc, stub, sizeof(stub));
             KeLog("[ldr]  gdi32!GdiValidateHandle -> TRUE stub\n");
+        }
+        /* GDI batches drawing calls in the TEB and only flushes them at
+         * GdiBatchLimit or an explicit GdiFlush. A batched call never reaches
+         * win32k, so nothing would appear on screen until something happened to
+         * flush; a limit of 1 means "never batch", which is also what a
+         * debugger-friendly Windows setup uses. */
+        UINT64 limit = LdrGetProcAddress(base, "GdiBatchLimit");
+        if (limit && MmProbeForWrite(limit, sizeof(UINT32))) {
+            *(UINT32 *)limit = 1;
+            KeLog("[ldr]  gdi32!GdiBatchLimit = 1 (batching off)\n");
         }
     }
 
@@ -947,6 +1095,28 @@ UINT64 LdrLoadLibrary(const char *name)
     if (base)
         ldr_sync_module_list(); /* thread the newly-loaded module(s) into Ldr */
     return base;
+}
+
+UINT64 LdrGetModuleBase(const char *name)
+{
+    return lookup_module(name);
+}
+
+void LdrSeedCrtCommandLine(UINT64 ansi_va, UINT64 wide_va)
+{
+    UINT64 base = lookup_module("msvcrt.dll");
+    if (!base)
+        return;
+
+    UINT64 acmdln = LdrGetProcAddress(base, "_acmdln");
+    UINT64 wcmdln = LdrGetProcAddress(base, "_wcmdln");
+    if (acmdln && MmProbeForWrite(acmdln, sizeof(UINT64)))
+        *(UINT64 *)acmdln = ansi_va;
+    if (wcmdln && MmProbeForWrite(wcmdln, sizeof(UINT64)))
+        *(UINT64 *)wcmdln = wide_va;
+    KeLog("[ldr]  msvcrt CRT command line seeded (_acmdln %p -> %p, "
+          "_wcmdln %p -> %p)\n", (void *)acmdln, (void *)ansi_va,
+          (void *)wcmdln, (void *)wide_va);
 }
 
 BOOLEAN LdrDescribeUserAddress(UINT64 addr, const char **name_out,

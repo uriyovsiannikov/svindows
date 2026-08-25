@@ -12,7 +12,9 @@
 #include <ntos/ps.h>
 #include <ntos/ldr.h>
 #include <ntos/io.h>
+#include <ntos/cm.h>
 #include <ntos/gfx.h>
+#include <ntos/win32k.h>
 #include <ntos/rtl.h>
 #include <nt/ntdef.h>
 #include <nt/ntstatus.h>
@@ -463,6 +465,11 @@ typedef UINT64 (*KI_SERVICE)(UINT64 *args);
 /* Minimal win32k/USER services used by the genuine win32u.dll.        */
 /* ------------------------------------------------------------------ */
 
+/* Offset of USER32's `gpsi` global (the SERVERINFO pointer) in the build in
+ * win/: read out of GetSysColor, which is `mov gpsi,%rax; mov
+ * 0x1360(%rax,%rdx,4),%eax`. Diagnostics only. */
+#define USER32_GPSI_OFFSET 0xBC8D8
+
 typedef struct _USER_MSG_LOCAL {
     UINT64 Hwnd;
     UINT32 Message;
@@ -514,12 +521,17 @@ static USER_MSG_QUEUE *KiUserQueueForThread(UINT32 thread_id)
 
 /* Keep a thread's input event in step with its queue. Called with the queue
  * already updated; safe from interrupt context (KeSetEvent masks interrupts
- * and only readies threads). */
+ * and only readies threads). A pending update region counts as work: the
+ * WM_PAINT it produces is synthesized by the message loop, not queued, so the
+ * event has to fire for it too or the loop sleeps through the repaint. */
+static UINT16 KiUserNextUpdateWindow(UINT32 thread_id);
+
 static void KiUserSyncInputEvent(USER_MSG_QUEUE *queue)
 {
     if (!queue->InputEvent)
         return;
-    if (queue->Head != queue->Tail)
+    UINT32 tid = (UINT32)(queue - g_user_thread_queues) + 1;
+    if (queue->Head != queue->Tail || KiUserNextUpdateWindow(tid))
         KeSetEvent(queue->InputEvent);
     else
         KeResetEvent(queue->InputEvent);
@@ -535,6 +547,34 @@ static UINT32 KiUserWindowOwner(UINT64 hwnd)
     if (!slot || slot >= 128)
         return 0;
     return g_window_owner[slot];
+}
+
+/*
+ * Update regions and WM_PAINT.
+ *
+ * win32k never queues WM_PAINT: a window carries an update region, and the
+ * owning thread's message loop synthesizes the message for as long as that
+ * region is non-empty. The same model here, with the region simplified to
+ * "the whole window": g_window_update[slot] counts the WM_PAINTs still owed,
+ * BeginPaint/ValidateRect clear it, and the count bounds redelivery so a
+ * client that ignores the message cannot spin its loop forever.
+ */
+#define USER_PAINT_SLOTS 128
+#define USER_PAINT_REDELIVERY 4
+#define WM_PAINT_ 0x000F
+
+static UINT8 g_window_update[USER_PAINT_SLOTS];
+
+/* First window owned by `tid` that still owes a WM_PAINT, in creation order
+ * (parents before children, which is the order win32k paints in). */
+static UINT16 KiUserNextUpdateWindow(UINT32 tid)
+{
+    if (!tid)
+        return 0;
+    for (UINT16 slot = 1; slot < USER_PAINT_SLOTS; slot++)
+        if (g_window_update[slot] && g_window_owner[slot] == tid)
+            return slot;
+    return 0;
 }
 
 static BOOLEAN KiUserEnqueueMessage(UINT64 hwnd, UINT32 message,
@@ -631,6 +671,33 @@ void KiUserQueueMouse(INT32 x, INT32 y, UINT8 buttons)
     g_user_mouse_buttons = buttons;
 }
 
+/* Mark a window as needing repaint and wake its owner thread's message loop. */
+static void KiUserInvalidateWindow(UINT16 slot)
+{
+    if (!slot || slot >= USER_PAINT_SLOTS)
+        return;
+    UINT64 flags = KiIrqSave();
+    g_window_update[slot] = USER_PAINT_REDELIVERY;
+    USER_MSG_QUEUE *queue = KiUserQueueForThread(g_window_owner[slot]);
+    if (queue)
+        KiUserSyncInputEvent(queue);
+    KiIrqRestore(flags);
+}
+
+/* Drop a window's update region: it has been painted (or explicitly
+ * validated), so no further WM_PAINT is owed. */
+static void KiUserValidateWindow(UINT16 slot)
+{
+    if (!slot || slot >= USER_PAINT_SLOTS)
+        return;
+    UINT64 flags = KiIrqSave();
+    g_window_update[slot] = 0;
+    USER_MSG_QUEUE *queue = KiUserQueueForThread(g_window_owner[slot]);
+    if (queue)
+        KiUserSyncInputEvent(queue);
+    KiIrqRestore(flags);
+}
+
 static BOOLEAN KiUserTakeMessage(USER_MSG_LOCAL *out, BOOLEAN remove)
 {
     PKTHREAD thread = KeGetCurrentThread();
@@ -640,8 +707,30 @@ static BOOLEAN KiUserTakeMessage(USER_MSG_LOCAL *out, BOOLEAN remove)
         return FALSE;
     UINT64 flags = KiIrqSave();
     if (queue->Tail == queue->Head) {
+        /* Nothing posted. An invalid window becomes WM_PAINT right here, which
+         * is where win32k generates it: paint messages live in the window's
+         * update region, never in the queue, so they are always produced last
+         * and always after everything that was actually posted. */
+        UINT16 slot = KiUserNextUpdateWindow(thread ? thread->ThreadId : 0);
+        if (!slot) {
+            KiIrqRestore(flags);
+            return FALSE;
+        }
+        memset(out, 0, sizeof(*out));
+        out->Hwnd = 0x10000u | slot;
+        out->Message = WM_PAINT_;
+        out->Time = (UINT32)(KeGetTickCount() * 10);
+        /* Windows keeps producing WM_PAINT until the window is validated.
+         * Count every delivery, not just the removing ones, so a client that
+         * neither paints nor validates cannot livelock its own message loop
+         * on a window we hand it forever. */
+        if (g_window_update[slot] && !--g_window_update[slot]) {
+            KeLog("[user] WM_PAINT for HWND %p went unpainted; validating the "
+                  "window to keep the message loop live\n", (void *)out->Hwnd);
+            KiUserSyncInputEvent(queue);
+        }
         KiIrqRestore(flags);
-        return FALSE;
+        return TRUE;
     }
     *out = queue->Msgs[queue->Tail];
     if (remove) {
@@ -954,14 +1043,6 @@ static UINT64 NtUserCallOneParam(UINT64 *a)
         KeLog("[user] NtUserCallOneParam(value=%p, routine=0x%lx) -> 0\n",
               (void *)a[0], (unsigned long)routine);
     }
-    return 0;
-}
-
-static UINT64 NtUserGetDC(UINT64 *a)
-{
-    /* No visible/user DC has been created by win32k yet. Returning NULL is a
-     * valid failed GetDC result; returning STATUS_NOT_IMPLEMENTED here is not,
-     * because GDI32 would interpret it as a kernel GDI handle. */
     return 0;
 }
 
@@ -1437,35 +1518,44 @@ static void KiRepaintAll(void);
 static UINT64 NtUserShowWindow(UINT64 *a)
 {
     UINT16 slot = (UINT16)(a[0] & 0xFFFF);
+    UINT32 cmd = (UINT32)a[1] & 0xF;
     if (slot && slot < 256) {
         UINT64 window = PROCESS_USER_OBJECT_ARENA_VA + (UINT64)slot * 0x200;
         if (MmProbeForWrite(window + WND_STYLE_OFF, sizeof(UINT32))) {
             UINT32 *style = (UINT32 *)(window + WND_STYLE_OFF);
-            UINT32 cmd = (UINT32)a[1] & 0xF;
             if (cmd == 0) /* SW_HIDE */
                 *style &= ~WS_VISIBLE_;
             else
                 *style |= WS_VISIBLE_;
         }
     }
+    /* Becoming visible makes the whole window invalid, which is what turns
+     * into the window's first WM_PAINT. */
+    if (cmd == 0)
+        KiUserValidateWindow(slot);
+    else
+        KiUserInvalidateWindow(slot);
+    KeLog("[user] ShowWindow(HWND %p, cmd %lu)\n", (void *)a[0],
+          (unsigned long)cmd);
     KiRepaintAll();
     return 1;
 }
 
 static UINT64 NtUserSetWindowPos(UINT64 *a)
 {
-    /* (hwnd, x, y, cx, cy, insertAfter, flags...) with SWP_NOMOVE=0x2 and
-     * SWP_NOSIZE=0x1; SWP_SHOWWINDOW (0x40) / SWP_HIDEWINDOW (0x80). */
+    /* Genuine win32k argument order: (hwnd, hWndInsertAfter, x, y,
+     * cx, cy, flags). SWP_NOMOVE=0x2, SWP_NOSIZE=0x1, SWP_SHOWWINDOW=0x40,
+     * SWP_HIDEWINDOW=0x80. */
     UINT32 flags = (UINT32)a[6];
     UINT16 slot = (UINT16)(a[0] & 0xFFFF);
     if (slot && slot < WINPAINT_SLOTS && g_win_kind[slot]) {
         if (!(flags & 0x2)) {
-            g_win_x[slot] = (INT32)a[1];
-            g_win_y[slot] = (INT32)a[2];
+            g_win_x[slot] = (INT32)a[2];
+            g_win_y[slot] = (INT32)a[3];
         }
         if (!(flags & 0x1)) {
-            g_win_w[slot] = (UINT32)a[3];
-            g_win_h[slot] = (UINT32)a[4];
+            g_win_w[slot] = (UINT32)a[4];
+            g_win_h[slot] = (UINT32)a[5];
         }
     }
     if (flags & 0xC0) {
@@ -1480,7 +1570,17 @@ static UINT64 NtUserSetWindowPos(UINT64 *a)
                     *style &= ~WS_VISIBLE_;
             }
         }
+        if (flags & 0x80)
+            KiUserValidateWindow(slot);
     }
+    /* Anything but a pure no-op move invalidates: a resized or newly shown
+     * window has to repaint. SWP_NOREDRAW (0x8) is the caller opting out. */
+    if (!(flags & 0x8) && (flags & 0x40 || !(flags & 0x3)))
+        KiUserInvalidateWindow(slot);
+    KeLog("[user] SetWindowPos(HWND %p, %ld,%ld %lux%lu, flags 0x%lx)\n",
+          (void *)a[0], (long)(INT32)a[2], (long)(INT32)a[3],
+          (unsigned long)(UINT32)a[4], (unsigned long)(UINT32)a[5],
+          (unsigned long)flags);
     KiRepaintAll();
     return 1;
 }
@@ -1502,47 +1602,51 @@ static void KiRepaintAll(void)
 }
 
 
-/* ShowWindow(hwnd, cmd): keep the client-side style's WS_VISIBLE bit in
- * sync, which is what IsWindowVisible (and the shell's readiness checks)
- * read directly from the window head. */
-static UINT64 NtUserShowWindow(UINT64 *a)
+static UINT64 NtUserMoveWindow(UINT64 *a) { return 1; }
+
+/* (hwnd, const RECT *rect, BOOL erase). The update region is whole-window, so
+ * a partial rectangle just marks the window dirty. */
+static UINT64 NtUserInvalidateRect(UINT64 *a)
 {
-    UINT16 slot = (UINT16)(a[0] & 0xFFFF);
-    if (slot && slot < 256) {
-        UINT64 window = PROCESS_USER_OBJECT_ARENA_VA + (UINT64)slot * 0x200;
-        if (MmProbeForWrite(window + WND_STYLE_OFF, sizeof(UINT32))) {
-            UINT32 *style = (UINT32 *)(window + WND_STYLE_OFF);
-            UINT32 cmd = (UINT32)a[1] & 0xF;
-            if (cmd == 0) /* SW_HIDE */
-                *style &= ~WS_VISIBLE_;
-            else
-                *style |= WS_VISIBLE_;
-        }
-    }
+    KiUserInvalidateWindow((UINT16)(a[0] & 0xFFFF));
     return 1;
 }
 
-static UINT64 NtUserSetWindowPos(UINT64 *a)
+/* (hwnd, const RECT *rect) */
+static UINT64 NtUserValidateRect(UINT64 *a)
 {
-    /* SWP_SHOWWINDOW (0x40) / SWP_HIDEWINDOW (0x80) in the flags argument. */
-    UINT32 flags = (UINT32)a[7];
-    if (flags & 0xC0) {
-        UINT16 slot = (UINT16)(a[0] & 0xFFFF);
-        if (slot && slot < 256) {
-            UINT64 window = PROCESS_USER_OBJECT_ARENA_VA + (UINT64)slot * 0x200;
-            if (MmProbeForWrite(window + WND_STYLE_OFF, sizeof(UINT32))) {
-                UINT32 *style = (UINT32 *)(window + WND_STYLE_OFF);
-                if (flags & 0x40)
-                    *style |= WS_VISIBLE_;
-                if (flags & 0x80)
-                    *style &= ~WS_VISIBLE_;
-            }
-        }
-    }
+    KiUserValidateWindow((UINT16)(a[0] & 0xFFFF));
     return 1;
 }
-static UINT64 NtUserMoveWindow(UINT64 *a) { return 1; }
-static UINT64 NtUserInvalidateRect(UINT64 *a) { return 1; }
+
+/* (hwnd, const RECT *rect, HRGN rgn, UINT flags): RDW_INVALIDATE=0x1,
+ * RDW_VALIDATE=0x8. */
+static UINT64 NtUserRedrawWindow(UINT64 *a)
+{
+    UINT32 flags = (UINT32)a[3];
+    if (flags & 0x8)
+        KiUserValidateWindow((UINT16)(a[0] & 0xFFFF));
+    else if (flags & 0x1)
+        KiUserInvalidateWindow((UINT16)(a[0] & 0xFFFF));
+    return 1;
+}
+
+/* (hwnd, RECT *out, BOOL erase): the update rectangle in client coordinates,
+ * empty when the window is clean. */
+static UINT64 NtUserGetUpdateRect(UINT64 *a)
+{
+    UINT16 slot = (UINT16)(a[0] & 0xFFFF);
+    BOOLEAN dirty = slot && slot < USER_PAINT_SLOTS && g_window_update[slot];
+    INT32 *rect = (INT32 *)a[1];
+    if (rect && MmProbeForWrite((UINT64)rect, 16)) {
+        rect[0] = 0;
+        rect[1] = 0;
+        rect[2] = dirty && slot < WINPAINT_SLOTS ? (INT32)g_win_w[slot] : 0;
+        rect[3] = dirty && slot < WINPAINT_SLOTS ? (INT32)g_win_h[slot] : 0;
+    }
+    return dirty ? 1 : 0;
+}
+
 static UINT64 NtUserUpdateWindow(UINT64 *a) { return 1; }
 static UINT64 NtUserPostMessage(UINT64 *a)
 {
@@ -1675,13 +1779,181 @@ static UINT64 NtUserCallHwndLock(UINT64 *a) { return 0; }
 static UINT64 NtUserCallHwndParam(UINT64 *a) { return 0; }
 static UINT64 NtUserCallTwoParam(UINT64 *a) { return 0; }
 static UINT64 NtUserEnumDisplayMonitors(UINT64 *a) { return 0; }
+static UINT64 NtUserGetDC(UINT64 *a)
+{
+    /* GetDC(NULL) means the whole screen; GetDC(hwnd) is clipped to the
+     * window. Non-client areas are not modelled, so the client rectangle is
+     * the window rectangle. */
+    UINT64 hwnd = a[0];
+    INT32 x = 0, y = 0;
+    INT32 w = (INT32)GfxFramebuffer.Width, h = (INT32)GfxFramebuffer.Height;
+    UINT16 slot = (UINT16)(hwnd & 0xFFFF);
+    if (hwnd && slot && slot < WINPAINT_SLOTS && g_win_kind[slot]) {
+        x = g_win_x[slot];
+        y = g_win_y[slot];
+        w = (INT32)g_win_w[slot];
+        h = (INT32)g_win_h[slot];
+    }
+    return W32kAcquireWindowDc(hwnd, x, y, w, h);
+}
+
+/* GetDCEx(hwnd, hrgnClip, flags) and GetWindowDC(hwnd) reach the same cached
+ * device context; the clipping region and the non-client distinction are not
+ * modelled yet. */
+static UINT64 NtUserGetDCEx(UINT64 *a)
+{
+    return NtUserGetDC(a);
+}
+
+
+/* ------------------------------------------------------------------ */
+/* USER objects other than windows                                     */
+/*                                                                     */
+/* USER32 validates every handle it is given against the shared         */
+/* HANDLEENTRY table, so a cursor or an accelerator table cannot be a   */
+/* fabricated number: it needs a real entry with the right type byte and */
+/* an object head in the arena. Types follow the native ordering        */
+/* (TYPE_WINDOW 1, TYPE_MENU 2, TYPE_CURSOR 3, ..., TYPE_ACCELTABLE 8). */
+/* ------------------------------------------------------------------ */
+
+#define USER_TYPE_CURSOR 3
+#define USER_TYPE_ACCEL  8
+
+#define USER_OBJECT_SLOTS \
+    (PROCESS_USER_OBJECT_ARENA_SIZE / 0x200)
+
+static UINT16 g_user_next_object = 200; /* above the window index range */
+
+static UINT64 KiUserAllocateObject(UINT8 type, UINT64 *head_out)
+{
+    if (g_user_next_object >= USER_OBJECT_SLOTS)
+        return 0;
+    UINT16 index = g_user_next_object++;
+    UINT64 head = PROCESS_USER_OBJECT_ARENA_VA + (UINT64)index * 0x200;
+    memset((void *)head, 0, 0x200);
+    UINT64 handle = (1ULL << 16) | index;
+    *(UINT64 *)head = handle;          /* the head carries its own handle */
+    *(UINT32 *)(head + 8) = 1;         /* lock count */
+
+    MmProtectRange(PROCESS_USER_SHARED_TABLE_VA,
+                   PROCESS_USER_SHARED_TABLE_SIZE, TRUE);
+    UINT8 *entry = (UINT8 *)(PROCESS_USER_SHARED_TABLE_VA +
+                             (UINT64)index * 24);
+    *(UINT64 *)(entry + 0) = head;     /* Object   */
+    *(UINT64 *)(entry + 8) = 0;        /* Owner    */
+    entry[16] = type;                  /* Type     */
+    entry[17] = 0;                     /* Flags    */
+    *(UINT16 *)(entry + 18) = 1;       /* Generation */
+    MmProtectRange(PROCESS_USER_SHARED_TABLE_VA,
+                   PROCESS_USER_SHARED_TABLE_SIZE, FALSE);
+
+    if (head_out)
+        *head_out = head;
+    return handle;
+}
+
+/*
+ * HCURSOR NtUserFindExistingCursorIcon(PUNICODE_STRING module,
+ *                                      PUNICODE_STRING resource, void *param)
+ *
+ * win32k caches cursors and icons per (module, resource) and hands the existing
+ * object back; in a real session the stock IDC_* cursors are always already
+ * there. Answering NULL sends USER32 down a creation path that this build only
+ * reaches through NtUserSetCursorIconData, so the cache is what makes
+ * LoadCursorW succeed -- and a program that checks its cursor (notepad does,
+ * before it will register its window class) stops dead without it.
+ */
+#define USER_CURSOR_CACHE 32
+
+static UINT64 NtUserFindExistingCursorIcon(UINT64 *a)
+{
+    typedef struct _CURSOR_KEY {
+        UINT64 Module;
+        UINT64 Resource;
+        UINT64 Handle;
+    } CURSOR_KEY;
+    static CURSOR_KEY cache[USER_CURSOR_CACHE];
+    static UINT32 count;
+
+    /* The resource id is what distinguishes stock cursors; for a string name
+     * the pointer to the captured name serves as the key. */
+    UINT64 module = a[0], resource = a[1];
+    UINT64 key = resource;
+    if (resource && MmProbeForRead(resource, 16))
+        key = *(volatile UINT64 *)(resource + 8); /* UNICODE_STRING.Buffer */
+
+    for (UINT32 i = 0; i < count; i++)
+        if (cache[i].Module == module && cache[i].Resource == key)
+            return cache[i].Handle;
+
+    UINT64 head = 0;
+    UINT64 handle = KiUserAllocateObject(USER_TYPE_CURSOR, &head);
+    if (!handle)
+        return 0;
+    if (count < USER_CURSOR_CACHE) {
+        cache[count].Module = module;
+        cache[count].Resource = key;
+        cache[count].Handle = handle;
+        count++;
+    }
+    KeLog("[user] cursor for module %p resource %p -> %p\n", (void *)module,
+          (void *)key, (void *)handle);
+    return handle;
+}
+
+/* HACCEL NtUserCreateAcceleratorTable(LPACCEL entries, ULONG count) */
+static UINT64 NtUserCreateAcceleratorTable(UINT64 *a)
+{
+    UINT32 entries = (UINT32)a[1];
+    UINT64 head = 0;
+    UINT64 handle = KiUserAllocateObject(USER_TYPE_ACCEL, &head);
+    if (!handle)
+        return 0;
+    /* The table itself is only consulted by TranslateAccelerator, which is a
+     * no-op here; the handle is what the caller checks. */
+    KeLog("[user] accelerator table (%lu entries) -> %p\n",
+          (unsigned long)entries, (void *)handle);
+    return handle;
+}
+
+static UINT64 NtUserDestroyAcceleratorTable(UINT64 *a) { return 1; }
+static UINT64 NtUserDestroyCursor(UINT64 *a) { return 1; }
+static UINT64 NtUserSetCursor(UINT64 *a) { return 0; }
+
+/* PAINTSTRUCT on x64: HDC hdc (0), BOOL fErase (8), RECT rcPaint (12..28),
+ * BOOL fRestore (28), BOOL fIncUpdate (32), BYTE rgbReserved[32] (36). */
+#define PAINTSTRUCT_SIZE 72
+
 static UINT64 NtUserBeginPaint(UINT64 *a)
 {
+    UINT16 slot = (UINT16)(a[0] & 0xFFFF);
     UINT8 *ps = (UINT8 *)a[1];
-    if (ps && MmProbeForWrite((UINT64)ps, 104))
-        memset(ps, 0, 104);
-    return 0;
+    if (!ps || !MmProbeForWrite((UINT64)ps, PAINTSTRUCT_SIZE))
+        return 0;
+    memset(ps, 0, PAINTSTRUCT_SIZE);
+
+    INT32 w = 0, h = 0;
+    if (slot && slot < WINPAINT_SLOTS) {
+        w = (INT32)g_win_w[slot];
+        h = (INT32)g_win_h[slot];
+    }
+    *(UINT32 *)(ps + 8) = 1;  /* fErase: nothing has drawn the background */
+    *(INT32 *)(ps + 12) = 0;  /* rcPaint, in client coordinates */
+    *(INT32 *)(ps + 16) = 0;
+    *(INT32 *)(ps + 20) = w;
+    *(INT32 *)(ps + 24) = h;
+
+    KiUserValidateWindow(slot);
+    UINT64 hdc = W32kAcquireWindowDc(a[0], slot < WINPAINT_SLOTS ?
+                                     g_win_x[slot] : 0,
+                                     slot < WINPAINT_SLOTS ?
+                                     g_win_y[slot] : 0, w, h);
+    *(UINT64 *)(ps + 0) = hdc;
+    KeLog("[user] BeginPaint(HWND %p) rcPaint 0,0,%ld,%ld -> hdc %p\n",
+          (void *)a[0], (long)w, (long)h, (void *)hdc);
+    return hdc;
 }
+
 static UINT64 NtUserEndPaint(UINT64 *a) { return 1; }
 
 /* ------------------------------------------------------------------ */
@@ -2032,6 +2304,33 @@ static UINT64 NtUserCreateWindowEx(UINT64 *a)
               (void *)(cls ? cls->WndProc : 0),
               (unsigned long)(cls ? cls->WndExtra : 0));
     }
+    if (index < WINPAINT_SLOTS) {
+        g_win_kind[index] = WINPAINT_GENERIC;
+        if (cls && KiClassNameIs(cls->Name, "WorkerW"))
+            g_win_kind[index] = WINPAINT_DESKTOP;
+        else if (cls && KiClassNameIs(cls->Name, "Shell_TrayWnd"))
+            g_win_kind[index] = WINPAINT_TASKBAR;
+        g_win_x[index] = (INT32)a[5];
+        g_win_y[index] = (INT32)a[6];
+        g_win_w[index] = (UINT32)a[7];
+        g_win_h[index] = (UINT32)a[8];
+    }
+    /* Bring-up shortcut: the desktop and taskbar are painted the moment
+     * they exist. The shell's own ShowWindow/SetWindowPos traffic does not
+     * reach those services yet, so waiting for a visibility bit would keep
+     * the screen black. */
+    if (index < WINPAINT_SLOTS &&
+        (g_win_kind[index] == WINPAINT_DESKTOP ||
+         g_win_kind[index] == WINPAINT_TASKBAR)) {
+        *(volatile UINT32 *)(PROCESS_USER_OBJECT_ARENA_VA +
+                             (UINT64)index * 0x200 + WND_STYLE_OFF) |=
+            WS_VISIBLE_;
+        KiRepaintAll();
+    }
+    /* A window that is created visible owes its first WM_PAINT immediately. */
+    if (((UINT32)a[4] & WS_VISIBLE_) || g_win_kind[index] == WINPAINT_DESKTOP ||
+        g_win_kind[index] == WINPAINT_TASKBAR)
+        KiUserInvalidateWindow(index);
     if (cls && cls->WndProc) {
         UINT64 cs = KiBuildCreateStruct(a, hwnd);
         if (KiStartUserCallback(cls->WndProc, hwnd, 0x0081 /* WM_NCCREATE */,
@@ -2132,10 +2431,13 @@ static UINT64 NtUserDestroyWindow(UINT64 *a)
     UINT16 slot = (UINT16)(a[0] & 0xFFFF);
     if (slot && slot < 128) {
         g_window_owner[slot] = 0;
+        if (slot < WINPAINT_SLOTS)
+            g_win_kind[slot] = WINPAINT_NONE;
         if (g_user_active_hwnd == a[0])
             g_user_active_hwnd = 0;
     }
-    return 0;
+    KiRepaintAll();
+    return 1;
 }
 
 static UINT64 NtUserDdeInitialize(UINT64 *a)
@@ -2298,6 +2600,43 @@ static KI_SERVICE KiServiceTable[NTOS_MAX_SYSCALL];
 #define SN_NtUserChangeWindowMessageFilterEx 0x134A
 #define SN_NtUserGetObjectInformation     0x106E
 #define SN_NtUserRegisterHotKey           0x1403
+#define SN_NtUserValidateRect             0x10CF
+#define SN_NtUserRedrawWindow             0x1016
+#define SN_NtUserGetUpdateRect            0x1056
+#define SN_NtUserFindExistingCursorIcon   0x1041
+#define SN_NtUserCreateAcceleratorTable   0x10F2
+#define SN_NtUserDestroyAcceleratorTable  0x10FF
+#define SN_NtUserDestroyCursor            0x109E
+#define SN_NtUserSetCursor                0x101D
+#define SN_NtGdiGetEntry                  0x12AE
+#define SN_NtGdiCreateSolidBrush          0x10BA
+#define SN_NtGdiCreatePen                 0x1059
+#define SN_NtGdiHfontCreate               0x105F
+#define SN_NtGdiCreateRectRgn             0x1086
+#define SN_NtGdiSelectBrush               0x12F6
+#define SN_NtGdiSelectPen                 0x12F8
+#define SN_NtGdiSelectFont                0x103C
+#define SN_NtGdiSelectBitmap              0x100E
+#define SN_NtGdiDeleteObjectApp           0x1026
+#define SN_NtGdiPatBlt                    0x105C
+#define SN_NtGdiBitBlt                    0x100B
+#define SN_NtGdiExtTextOutW               0x103B
+#define SN_NtGdiGetTextMetricsW           0x1077
+#define SN_NtGdiGetTextExtent             0x1096
+#define SN_NtGdiGetTextExtentExW          0x12CB
+#define SN_NtGdiSetPixel                  0x10B1
+#define SN_NtGdiRectangle                 0x1092
+#define SN_NtGdiMoveTo                    0x12DC
+#define SN_NtGdiLineTo                    0x1044
+#define SN_NtGdiCreateCompatibleDC        0x1057
+#define SN_NtGdiCreateCompatibleBitmap    0x104E
+#define SN_NtGdiCreateBitmap              0x106F
+#define SN_NtGdiGetDCObject               0x1038
+#define SN_NtGdiFlush                     0x1015
+#define SN_NtGdiGetDeviceCaps             0x12A6
+#define SN_NtGdiGetCurrentDpiInfo         0x12A5
+#define SN_NtUserGetDCEx                  0x1094
+#define SN_NtUserGetWindowDC              0x1066
 
 void KiInitializeServiceTable(void)
 {
@@ -2401,6 +2740,46 @@ void KiInitializeServiceTable(void)
     KiServiceTable[SN_NtUserSetWindowLongPtr] = NtUserSetWindowLong;
     KiServiceTable[SN_NtUserChangeWindowMessageFilterEx] =
         NtUserChangeWindowMessageFilterEx;
+    KiServiceTable[SN_NtUserValidateRect] = NtUserValidateRect;
+    KiServiceTable[SN_NtUserRedrawWindow] = NtUserRedrawWindow;
+    KiServiceTable[SN_NtUserGetUpdateRect] = NtUserGetUpdateRect;
+    KiServiceTable[SN_NtUserFindExistingCursorIcon] =
+        NtUserFindExistingCursorIcon;
+    KiServiceTable[SN_NtUserCreateAcceleratorTable] =
+        NtUserCreateAcceleratorTable;
+    KiServiceTable[SN_NtUserDestroyAcceleratorTable] =
+        NtUserDestroyAcceleratorTable;
+    KiServiceTable[SN_NtUserDestroyCursor] = NtUserDestroyCursor;
+    KiServiceTable[SN_NtUserSetCursor] = NtUserSetCursor;
+    KiServiceTable[SN_NtGdiGetEntry] = NtGdiGetEntry;
+    KiServiceTable[SN_NtGdiCreateSolidBrush] = NtGdiCreateSolidBrush;
+    KiServiceTable[SN_NtGdiCreatePen] = NtGdiCreatePen;
+    KiServiceTable[SN_NtGdiHfontCreate] = NtGdiHfontCreate;
+    KiServiceTable[SN_NtGdiCreateRectRgn] = NtGdiCreateRectRgn;
+    KiServiceTable[SN_NtGdiSelectBrush] = NtGdiSelectBrush;
+    KiServiceTable[SN_NtGdiSelectPen] = NtGdiSelectPen;
+    KiServiceTable[SN_NtGdiSelectFont] = NtGdiSelectFont;
+    KiServiceTable[SN_NtGdiSelectBitmap] = NtGdiSelectBitmap;
+    KiServiceTable[SN_NtGdiDeleteObjectApp] = NtGdiDeleteObjectApp;
+    KiServiceTable[SN_NtGdiPatBlt] = NtGdiPatBlt;
+    KiServiceTable[SN_NtGdiBitBlt] = NtGdiBitBlt;
+    KiServiceTable[SN_NtGdiExtTextOutW] = NtGdiExtTextOutW;
+    KiServiceTable[SN_NtGdiGetTextMetricsW] = NtGdiGetTextMetricsW;
+    KiServiceTable[SN_NtGdiGetTextExtent] = NtGdiGetTextExtent;
+    KiServiceTable[SN_NtGdiGetTextExtentExW] = NtGdiGetTextExtentExW;
+    KiServiceTable[SN_NtGdiSetPixel] = NtGdiSetPixel;
+    KiServiceTable[SN_NtGdiRectangle] = NtGdiRectangle;
+    KiServiceTable[SN_NtGdiMoveTo] = NtGdiMoveTo;
+    KiServiceTable[SN_NtGdiLineTo] = NtGdiLineTo;
+    KiServiceTable[SN_NtGdiCreateCompatibleDC] = NtGdiCreateCompatibleDC;
+    KiServiceTable[SN_NtGdiCreateCompatibleBitmap] = NtGdiCreateCompatibleBitmap;
+    KiServiceTable[SN_NtGdiCreateBitmap] = NtGdiCreateBitmap;
+    KiServiceTable[SN_NtGdiGetDCObject] = NtGdiGetDCObject;
+    KiServiceTable[SN_NtGdiFlush] = NtGdiFlush;
+    KiServiceTable[SN_NtGdiGetDeviceCaps] = NtGdiGetDeviceCaps;
+    KiServiceTable[SN_NtGdiGetCurrentDpiInfo] = NtGdiGetCurrentDpiInfo;
+    KiServiceTable[SN_NtUserGetDCEx] = NtUserGetDCEx;
+    KiServiceTable[SN_NtUserGetWindowDC] = NtUserGetDCEx;
 }
 
 UINT64 KiSystemServiceDispatch(UINT64 number, UINT64 *reg_args, UINT64 user_rsp)
@@ -2414,6 +2793,68 @@ UINT64 KiSystemServiceDispatch(UINT64 number, UINT64 *reg_args, UINT64 user_rsp)
         KeLog("[user] first win32u service 0x%lx (tid %lu)\n",
               (unsigned long)number,
               caller ? (unsigned long)caller->ThreadId : 0ul);
+        /* The first win32k-range call means USER32 finished its process
+         * attach, so its `gpsi` is set. Report where it points: SERVERINFO is
+         * the page GetSystemMetrics and GetSysColor answer out of without ever
+         * entering the kernel, so a wrong pointer here is invisible in every
+         * other log. */
+        static UINT8 gpsi_reported;
+        if (!gpsi_reported) {
+            gpsi_reported = 1;
+            UINT64 user32 = LdrGetModuleBase("user32.dll");
+            if (user32 && MmProbeForRead(user32 + USER32_GPSI_OFFSET, 8)) {
+                UINT64 gpsi = *(volatile UINT64 *)(user32 +
+                                                   USER32_GPSI_OFFSET);
+                KeLog("[user] USER32 gpsi = %p (SERVERINFO is %p) -> %s\n",
+                      (void *)gpsi, (void *)PROCESS_SERVER_INFO_VA,
+                      gpsi == PROCESS_SERVER_INFO_VA ? "connected"
+                                                     : "NOT ours");
+                if (gpsi == PROCESS_SERVER_INFO_VA)
+                    KeLog("[user]   screen from gpsi: %ldx%ld\n",
+                          (long)*(volatile INT32 *)(gpsi + 0x758),
+                          (long)*(volatile INT32 *)(gpsi + 0x75C));
+            }
+            /* GDI32 owns the client side of the handle table: it caches the
+             * table pointer and the handle count in its own data, and every
+             * handle check goes through them. If its initialization did not
+             * publish them, nothing GDI does can succeed, so fill them in. */
+            UINT64 gdi32 = LdrGetModuleBase("gdi32.dll");
+            if (gdi32) {
+                UINT64 table = LdrGetProcAddress(gdi32,
+                                                 "pGdiSharedHandleTable");
+                UINT64 count = LdrGetProcAddress(gdi32,
+                                                 "gMaxGdiHandleCount");
+                if (table && MmProbeForWrite(table, sizeof(UINT64))) {
+                    if (*(volatile UINT64 *)table != PROCESS_GDI_SHARED_TABLE_VA)
+                        *(UINT64 *)table = PROCESS_GDI_SHARED_TABLE_VA;
+                }
+                if (count && MmProbeForWrite(count, sizeof(UINT32))) {
+                    if (*(volatile UINT32 *)count == 0)
+                        *(UINT32 *)count = 0x10000;
+                }
+                /* Every GDI handle check ends with
+                 *   (cell.ProcessId & ~1) == *(DWORD *)(gdi32 + 0x2E04C)
+                 * -- gdi32's cached process id, read out of GetDeviceCaps. The
+                 * cells win32k publishes carry this process's client id, so the
+                 * cache has to agree or every DC is rejected before any syscall
+                 * happens, which looks exactly like "GDI does nothing".
+                 */
+                UINT64 pid_cache = gdi32 + 0x2E04C;
+                if (MmProbeForWrite(pid_cache, sizeof(UINT32))) {
+                    UINT32 cached = *(volatile UINT32 *)pid_cache;
+                    if (cached != PROCESS_CLIENT_ID) {
+                        *(UINT32 *)pid_cache = PROCESS_CLIENT_ID;
+                        KeLog("[user] GDI32 cached process id %lu -> %u\n",
+                              (unsigned long)cached,
+                              (unsigned)PROCESS_CLIENT_ID);
+                    }
+                }
+                KeLog("[user] GDI32 pGdiSharedHandleTable=%p "
+                      "gMaxGdiHandleCount=%lu\n",
+                      table ? (void *)*(volatile UINT64 *)table : 0,
+                      count ? (unsigned long)*(volatile UINT32 *)count : 0ul);
+            }
+        }
     }
     if (number >= NTOS_MAX_SYSCALL || KiServiceTable[number] == NULL) {
         /* Win32k-range services (win32u) that we do not implement yet return

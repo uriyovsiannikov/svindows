@@ -29,6 +29,25 @@ NTSTATUS LdrLoadExecutable(const char *filename, UINT64 *entry_out,
 /* Resolve an exported routine's address in a loaded module. */
 UINT64 LdrGetProcAddress(UINT64 module_base, const char *name);
 
+/* Load base of an already-loaded module, or 0. Consults the loader's cache
+ * only: it never loads anything, so it is safe to call from a syscall. */
+UINT64 LdrGetModuleBase(const char *name);
+
+/*
+ * Point msvcrt.dll's `_acmdln` / `_wcmdln` data exports at the process's
+ * command line. The classic Microsoft CRT startup (which the Windows inbox
+ * utilities are built against) imports the address of those pointers and
+ * dereferences it before reaching WinMain; our msvcrt is built /noentry and so
+ * has no DllMain that could fill them in. Called once the process parameters
+ * exist, with the user addresses of the ANSI and wide command lines.
+ */
+void LdrSeedCrtCommandLine(UINT64 ansi_va, UINT64 wide_va);
+
+/* Arm the guard word below the kernel boot stack. The loader recurses per
+ * dependency edge on that stack, and it sits directly above the executive's
+ * globals, so an overflow has to be caught rather than left to corrupt them. */
+void LdrInitializeStackGuard(void);
+
 /*
  * Build the process's loader module list (PEB_LDR_DATA + one
  * LDR_DATA_TABLE_ENTRY per loaded module) in a user-readable region and point

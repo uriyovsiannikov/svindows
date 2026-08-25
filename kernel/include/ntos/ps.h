@@ -25,6 +25,16 @@ PKTHREAD PsCreateUserProcess(const char *name, const char *command_line,
                              UINT64 stack_base, UINT64 stack_top,
                              UINT64 start_argument);
 
+/*
+ * The single user process's client id. It has to be even: a GDI handle's cell
+ * carries the owning process id in a field whose low bit is a flag, and every
+ * gdi32 handle check compares (cell.ProcessId & ~1) against its own cached
+ * copy. An odd id therefore fails every check -- with an id of 1, gdi32
+ * rejected every device context before it made a single syscall. Real Windows
+ * process ids are multiples of four for the same reason.
+ */
+#define PROCESS_CLIENT_ID 4
+
 /* The (single) user process's PEB virtual address, shared by its threads. */
 #define PROCESS_PEB_VA 0x0000000000061000ULL
 #define PROCESS_MAIN_TEB_VA 0x0000000000050000ULL
@@ -48,7 +58,24 @@ PKTHREAD PsCreateUserProcess(const char *name, const char *command_line,
 #define PROCESS_USER_SHARED_TABLE_VA   0x0000000001180000ULL
 #define PROCESS_USER_SHARED_TABLE_SIZE (0x10000ULL * 24ULL)
 #define PROCESS_USER_OBJECT_ARENA_VA   0x0000000001300000ULL
-#define PROCESS_USER_OBJECT_ARENA_SIZE 0x0000000000010000ULL
+/* 0x200 bytes per USER object head. Windows take indices 1..127;
+ * cursors, accelerator tables and the other USER object types are
+ * allocated above them, so the arena has to be larger than the window
+ * range alone. */
+#define PROCESS_USER_OBJECT_ARENA_SIZE 0x0000000000040000ULL
+
+/* win32k's SERVERINFO ("gpsi"), reached through SHAREDINFO.psi: read-only
+ * shared memory USER32 answers GetSystemMetrics/GetSysColor out of. The
+ * supplied user32 build reads as far as gpsi+0x21F4, so four pages. */
+#define PROCESS_SERVER_INFO_VA   0x0000000001320000ULL
+#define PROCESS_SERVER_INFO_SIZE 0x0000000000004000ULL
+
+/* User-writable arena for the per-object GDI attribute blocks (DC_ATTR and
+ * friends) that a GDI cell's pUserInfo points at. GDI32 caches DC state there
+ * -- SetTextColor and SetBkColor never enter the kernel -- so win32k has to
+ * read the drawing colours back out of it. */
+#define PROCESS_GDI_ATTR_VA   0x0000000001340000ULL
+#define PROCESS_GDI_ATTR_SIZE 0x0000000000010000ULL
 
 /* Register the Event and Thread object types. Requires Ob. */
 void PsInitialize(void);

@@ -286,6 +286,56 @@ bottom of the graphics stack and builds up.
       model yet. Even in crashing runs the shell's other threads finish the
       taskbar bring-up (Shell_TrayWnd + WorkerW created with full callback
       chains, ~71 hotkeys registered); the crash kills only tid 1.
+- [x] **The desktop paints.** A minimal win32k-lite layer in the USER
+      syscall path classifies the shell's own windows by class name and
+      draws them on the linear framebuffer: WorkerW fills the screen with
+      a wallpaper color, Shell_TrayWnd becomes a bottom taskbar strip
+      (accent line, start box, "NTOS" label), generic windows get a plain
+      bordered surface. Painting fires on create/show/hide/move/destroy;
+      desktop and taskbar are painted immediately at creation since the
+      shell's ShowWindow/SetWindowPos traffic does not reach those services
+      yet. Verified by QEMU `screendump` pixel probes (wallpaper
+      #0e2a47 across the screen, #1f1f1f taskbar strip in the bottom 40
+      rows). This is bring-up scaffolding: the real milestone remains a
+      gdi32 DC surface so explorer paints itself through WM_PAINT.
+- [x] **The shell bootstrap is deterministic.** One use-after-free was behind
+      both the late-boot `STATUS_NO_MEMORY` and the timing-dependent ring-3
+      fault above. `NtCreateThreadEx` handed the KTHREAD a raw pointer to the
+      waitable thread object (`KTHREAD.TerminationObject`) without a
+      reference, and the shell's thread pool closes a thread handle long
+      before that thread exits; the object was freed, its 48 bytes were
+      recycled and zeroed by the next `ObCreateObject`, and thread exit then
+      ran `KiSignalObject` over a stale wait list — writing list pointers into
+      whatever now owned that memory. When the victim was a pool block header
+      the free list stopped being reusable, so the arena grew to ~188 MiB with
+      the in-use figure frozen and `NtSetValueKey` started failing at
+      `StartMenuInit`; when it was live user state, tid 1 died after its first
+      `CreateWindowEx`. The KTHREAD now holds a reference for as long as it
+      keeps the pointer and releases it right after signaling. Alongside the
+      fix the pool grew self-checking: a `'POOL'` header magic, a 16-byte
+      guard past every payload that names the overrunning allocation by tag on
+      free, and a periodic walk asserting that blocks still tile the arena.
+      Boots are now byte-identical run to run: 3 arena growths, no traps, no
+      corruption, `StartMenuInit` written successfully.
+- [x] **Update regions and WM_PAINT.** Windows carry an update region and the
+      owning thread's message loop synthesizes `WM_PAINT` from it, as win32k
+      does (paint messages are never queued): create-visible, `ShowWindow`,
+      `SetWindowPos` and `NtUserInvalidateRect`/`NtUserRedrawWindow` mark a
+      window dirty and signal the owner's USER input event, `GetMessage` /
+      `PeekMessage` / `WaitMessage` produce the message from it, and
+      `NtUserBeginPaint` (with a correctly sized x64 PAINTSTRUCT and a real
+      `rcPaint`) / `NtUserValidateRect` clear it. Redelivery is capped so a
+      client that ignores the message cannot livelock its own loop. The shell
+      does receive the taskbar's `WM_PAINT` and does not yet act on it: it
+      never reaches `NtUserDispatchMessage`, and its windows are still created
+      0x0 because the `SetWindowPos` that would size them never arrives — the
+      next thing to trace.
+- [ ] `NtUserBeginPaint` still returns a NULL HDC: there is no GDI surface to
+      hand out. The GDI shared handle table is mapped and published at
+      `PEB->GdiSharedHandleTable`, but no cell is ever filled, so the genuine
+      gdi32 has nothing to validate. Next: kernel DC/surface objects behind
+      real GDICELL64 entries, then `NtGdiPatBlt`/`BitBlt`/`ExtTextOutW` onto
+      the framebuffer, so `BeginPaint` returns a DC the shell can draw into.
 - [ ] A window/compositor model (drawing windows, z-order, dirty rectangles).
 - [ ] `win32k`-style kernel graphics + a `gdi32`/`user32` surface so Win32 GUI
       programs can create windows and paint — the bridge from console programs

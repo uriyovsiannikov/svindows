@@ -176,6 +176,38 @@ static void lfn_put_fragment(char out[260], const FAT_LFN_ENTRY *lfn)
     }
 }
 
+/*
+ * Whether `name` can be represented as a FAT 8.3 short name at all: at most one
+ * dot, a base of 1..8 characters and an extension of at most 3.
+ *
+ * This matters because to_83 truncates rather than failing. "notepad.exe.mui"
+ * collapses to "NOTEPAD EXE" -- byte for byte the short name of notepad.exe --
+ * so a lookup for the .mui resource module happily returned the executable
+ * instead, and the loader then ran a second copy of the program as if it were a
+ * library. A name that cannot be 8.3 has to be matched against long names only.
+ */
+static BOOLEAN name_is_83(const char *name)
+{
+    UINT32 base = 0, ext = 0;
+    BOOLEAN in_ext = FALSE;
+    for (UINT32 i = 0; name[i]; i++) {
+        if (name[i] == '.') {
+            if (in_ext)
+                return FALSE; /* a second dot */
+            in_ext = TRUE;
+            continue;
+        }
+        if (in_ext) {
+            if (++ext > 3)
+                return FALSE;
+        } else {
+            if (++base > 8)
+                return FALSE;
+        }
+    }
+    return base != 0;
+}
+
 static BOOLEAN fat_find(UINT32 dir_cluster, const char *name,
                         FAT_DIRENT *out_entry)
 {
@@ -187,6 +219,7 @@ static BOOLEAN fat_find(UINT32 dir_cluster, const char *name,
     BOOLEAN found = FALSE;
     UINT8 name83[11];
     to_83(name, name83);
+    BOOLEAN short_name_usable = name_is_83(name);
     char long_name[260];
     BOOLEAN have_lfn = FALSE;
     memset(long_name, 0, sizeof(long_name));
@@ -217,7 +250,7 @@ static BOOLEAN fat_find(UINT32 dir_cluster, const char *name,
                 continue;
             }
             if ((have_lfn && name_equal_ci(long_name, name)) ||
-                memcmp(e->Name, name83, 11) == 0) {
+                (short_name_usable && memcmp(e->Name, name83, 11) == 0)) {
                 *out_entry = *e;
                 found = TRUE;
                 break;

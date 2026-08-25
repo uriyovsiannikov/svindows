@@ -30,11 +30,15 @@ __declspec(dllimport) DWORD  GetEnvironmentVariableW(const WCHAR *name,
 __declspec(dllexport) int _fmode;
 __declspec(dllexport) int _commode;
 
-/* MSVCRT exposes the raw wide command line as a data symbol, not a function.
- * Microsoft CRT startup code imports the address of this pointer and
- * dereferences it before calling main/wWinMain.  Keep a valid process-default
- * value available even before we have DLL entry-point initialization. */
-static WCHAR g_wcmdline[] = L"explorer.exe";
+/* MSVCRT exposes the raw command lines as data symbols, not functions: the
+ * Microsoft CRT startup imports the *address* of these pointers and
+ * dereferences it before calling main/wWinMain. This DLL is built /noentry and
+ * so has no DllMain to fill them in; PsCreateUserProcess seeds both from the
+ * process parameters once those exist (see LdrSeedCrtCommandLine). Until then
+ * they point at valid empty strings rather than at nothing. */
+static char  g_acmdline[] = "";
+static WCHAR g_wcmdline[] = L"";
+__declspec(dllexport) char  *_acmdln = g_acmdline;
 __declspec(dllexport) WCHAR *_wcmdln = g_wcmdline;
 
 static int g_errno;
@@ -1191,4 +1195,148 @@ __declspec(dllexport) int _strnicmp(const char *a, const char *b, SIZE_T n)
             return 0;
     }
     return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* The classic MSVC startup surface the Windows inbox utilities use    */
+/*                                                                     */
+/* notepad.exe and its siblings are built against the old msvcrt CRT   */
+/* rather than the UCRT: their entry point calls __getmainargs, walks   */
+/* the initializer tables through _initterm and only then reaches       */
+/* WinMain. These are the remaining pieces of that surface.            */
+/* ------------------------------------------------------------------ */
+
+/* Word-split a command line the way the CRT does: whitespace separates
+ * arguments and a double quote protects a run containing spaces. */
+static int crt_split_args(char *line, char **argv, int max)
+{
+    int count = 0;
+    char *p = line;
+    while (*p && count < max) {
+        while (*p == ' ' || *p == '\t')
+            p++;
+        if (!*p)
+            break;
+        int quoted = 0;
+        if (*p == '"') {
+            quoted = 1;
+            p++;
+        }
+        argv[count++] = p;
+        while (*p && (quoted ? *p != '"' : (*p != ' ' && *p != '\t')))
+            p++;
+        if (*p)
+            *p++ = 0;
+    }
+    return count;
+}
+
+#define CRT_MAX_ARGS 64
+
+/* int __getmainargs(int *argc, char ***argv, char ***env, int wildcards,
+ *                   int *new_mode) -- 0 on success. The argument vector points
+ * into a private copy of _acmdln, because the CRT is entitled to keep it. */
+__declspec(dllexport) int __getmainargs(int *argc, char ***argv, char ***env,
+                                        int expand_wildcards, int *new_mode)
+{
+    (void)expand_wildcards;
+    (void)new_mode;
+
+    SIZE_T length = 0;
+    const char *source = _acmdln ? _acmdln : "";
+    while (source[length])
+        length++;
+
+    HANDLE heap = GetProcessHeap();
+    char *copy = HeapAlloc(heap, 0, length + 1);
+    char **vector = HeapAlloc(heap, 0, sizeof(char *) * (CRT_MAX_ARGS + 1));
+    char **environment = HeapAlloc(heap, 0, sizeof(char *));
+    if (!copy || !vector || !environment)
+        return -1;
+    for (SIZE_T i = 0; i <= length; i++)
+        copy[i] = source[i];
+
+    int count = crt_split_args(copy, vector, CRT_MAX_ARGS);
+    vector[count] = 0;
+    environment[0] = 0;
+
+    if (argc) *argc = count;
+    if (argv) *argv = vector;
+    if (env)  *env = environment;
+    return 0;
+}
+
+/* operator new's "new handler" hook: no handler is installed, so report that
+ * the allocation failure was not retried. */
+__declspec(dllexport) int _callnewh(SIZE_T size)
+{
+    (void)size;
+    return 0;
+}
+
+/* No DBCS code page is active, so no byte is ever a lead byte. */
+__declspec(dllexport) int _ismbblead(unsigned int c)
+{
+    (void)c;
+    return 0;
+}
+
+__declspec(dllexport) SIZE_T wcsnlen(const WCHAR *s, SIZE_T max)
+{
+    SIZE_T n = 0;
+    while (n < max && s[n])
+        n++;
+    return n;
+}
+
+__declspec(dllexport) long _wtol(const WCHAR *s)
+{
+    while (*s == L' ' || *s == L'\t')
+        s++;
+    int negative = 0;
+    if (*s == L'-' || *s == L'+')
+        negative = (*s++ == L'-');
+    long value = 0;
+    while (*s >= L'0' && *s <= L'9')
+        value = value * 10 + (*s++ - L'0');
+    return negative ? -value : value;
+}
+
+/* iswctype for the ASCII range, which is all the classification the inbox
+ * utilities need from us today. The masks are the C1_* constants. */
+__declspec(dllexport) int iswctype(WCHAR c, unsigned short mask)
+{
+    unsigned short have = 0;
+    if (c < 128) {
+        if (c >= L'A' && c <= L'Z') have |= 0x0001 | 0x0100; /* UPPER | ALPHA */
+        if (c >= L'a' && c <= L'z') have |= 0x0002 | 0x0100; /* LOWER | ALPHA */
+        if (c >= L'0' && c <= L'9') have |= 0x0004;          /* DIGIT */
+        if (c == L' ' || (c >= 0x09 && c <= 0x0D)) have |= 0x0008; /* SPACE */
+        if (c < 0x20 || c == 0x7F) have |= 0x0020;           /* CNTRL */
+        else if (!(have & (0x0001 | 0x0002 | 0x0004)) && c != L' ')
+            have |= 0x0010;                                  /* PUNCT */
+        if (c > 0x20 && c < 0x7F) have |= 0x0080;            /* not blank */
+        if ((c >= L'0' && c <= L'9') || (c >= L'a' && c <= L'f') ||
+            (c >= L'A' && c <= L'F'))
+            have |= 0x0040;                                  /* XDIGIT */
+    }
+    return have & mask;
+}
+
+/* std::terminate: the C++ runtime's last resort. Exported under its MSVC
+ * mangled name by the link step. */
+__declspec(dllexport) void msvcrt_terminate(void)
+{
+    ExitProcess(3);
+}
+
+/* The C++ exception personality routine. Real C++ exception dispatch needs
+ * kernel-side SEH (.pdata/RUNTIME_FUNCTION unwinding), which does not exist
+ * yet; report "not handled here" so unwinding keeps looking rather than
+ * pretending to have caught something. ExceptionContinueSearch == 1. */
+__declspec(dllexport) int __CxxFrameHandler3(void *record, void *frame,
+                                             void *context, void *dispatch)
+{
+    (void)record; (void)frame; (void)context; (void)dispatch;
+    return 1;
 }

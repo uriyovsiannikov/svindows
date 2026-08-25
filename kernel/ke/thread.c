@@ -12,6 +12,7 @@
  */
 #include <ntos/ke.h>
 #include <ntos/ex.h>
+#include <ntos/ob.h>
 #include <ntos/rtl.h>
 #include <nt/peb.h>
 
@@ -251,10 +252,16 @@ NORETURN void KeTerminateThread(void)
     t->State = ThreadStateTerminated;
     KeLog("[ke]   thread '%s' (id %u) terminated\n", t->Name, t->ThreadId);
 
-    /* Signal the thread object so anyone waiting on this thread wakes up. */
+    /* Signal the thread object so anyone waiting on this thread wakes up, then
+     * release the reference the thread held on it (see NtCreateThreadEx). The
+     * dispatcher header is the object body, so the body pointer is the same
+     * address. */
     if (t->TerminationObject) {
-        t->TerminationObject->SignalState = 1;
-        KiSignalObject(t->TerminationObject);
+        PDISPATCHER_HEADER termination = t->TerminationObject;
+        termination->SignalState = 1;
+        KiSignalObject(termination);
+        t->TerminationObject = NULL;
+        ObDereferenceObject((POBJECT)termination);
     }
 
     /* NOTE: the thread's stack and KTHREAD are intentionally leaked for now;

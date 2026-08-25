@@ -421,7 +421,7 @@ UINT64 NtCreateThreadEx(UINT64 *a)
     teb->NtTib.StackBase = (PVOID)stack_top;
     teb->NtTib.StackLimit = (PVOID)stack_base;
     teb->ProcessEnvironmentBlock = (PVOID)PROCESS_PEB_VA;
-    teb->ClientId.UniqueProcess = (HANDLE)(ULONG_PTR)1;
+    teb->ClientId.UniqueProcess = (HANDLE)(ULONG_PTR)PROCESS_CLIENT_ID;
 
     /* Waitable thread object (signaled on exit). */
     POBJECT obj;
@@ -441,6 +441,11 @@ UINT64 NtCreateThreadEx(UINT64 *a)
         return (UINT64)STATUS_NO_MEMORY;
     }
     to->Thread = kt;
+    /* The KTHREAD keeps a raw pointer to this object until it exits, so it owns
+     * a reference of its own: user mode routinely closes the thread handle long
+     * before the thread runs to completion, and without this the exit path would
+     * signal a freed (and by then zeroed) dispatcher header. */
+    ObReferenceObject(obj);
     kt->TerminationObject = &to->Header;
 
     HANDLE h;

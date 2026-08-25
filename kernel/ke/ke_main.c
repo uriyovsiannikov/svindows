@@ -17,6 +17,7 @@
 #include <ntos/io.h>
 #include <ntos/cm.h>
 #include <ntos/gfx.h>
+#include <ntos/win32k.h>
 #include <ntos/input.h>
 #include <ntos/rtl.h>
 
@@ -246,6 +247,13 @@ void KiSystemStartup(UINT32 magic, UINT32 mbi_phys)
 
     /* Configuration manager (registry). */
     CmInitialize();
+
+    /* win32k's shared SERVERINFO, which USER32 reads during process attach. */
+    W32kInitializeServerInfo();
+
+    /* Arm the boot stack's overflow guard before the loader starts recursing
+     * through the dependency graph. */
+    LdrInitializeStackGuard();
 
     /* Phase 5/6: mount the disk, then load a PE from it and run it. */
     KeLog("[io]   bringing up disk and filesystem...\n");
